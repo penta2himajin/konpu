@@ -12,17 +12,26 @@ module konpu
 abstract sig AlgebraicStructure {
   rank: one Int
 }
-one sig Magma     extends AlgebraicStructure {} { rank = 0 }
-one sig Semigroup extends AlgebraicStructure {} { rank = 1 }
-one sig Monoid    extends AlgebraicStructure {} { rank = 2 }
-one sig Group     extends AlgebraicStructure {} { rank = 3 }
+one sig Magma     extends AlgebraicStructure {}
+one sig Semigroup extends AlgebraicStructure {}
+one sig Monoid    extends AlgebraicStructure {}
+one sig Group     extends AlgebraicStructure {}
+
+fact MagmaRank     { Magma.rank = 0 }
+fact SemigroupRank { Semigroup.rank = 1 }
+fact MonoidRank    { Monoid.rank = 2 }
+fact GroupRank     { Group.rank = 3 }
 
 abstract sig HigherKindedStructure {
   hkRank: one Int
 }
-one sig Functor     extends HigherKindedStructure {} { hkRank = 1 }
-one sig Applicative extends HigherKindedStructure {} { hkRank = 2 }
-one sig MonadS      extends HigherKindedStructure {} { hkRank = 3 }
+one sig Functor     extends HigherKindedStructure {}
+one sig Applicative extends HigherKindedStructure {}
+one sig MonadS      extends HigherKindedStructure {}
+
+fact FunctorRank     { Functor.hkRank = 1 }
+fact ApplicativeRank { Applicative.hkRank = 2 }
+fact MonadSRank      { MonadS.hkRank = 3 }
 
 -------------------------------------------------------------------------------
 -- Algebraic Declaration (type-operation pair)
@@ -80,13 +89,19 @@ fact SemigroupLaws {
   some r: LawRequirement | r.structure = Semigroup and r.requiredLaw = Associativity
 }
 
-fact MonoidLaws {
+fact MonoidLeftIdentityLaw {
   some r: LawRequirement | r.structure = Monoid and r.requiredLaw = LeftIdentity
+}
+
+fact MonoidRightIdentityLaw {
   some r: LawRequirement | r.structure = Monoid and r.requiredLaw = RightIdentity
 }
 
-fact GroupLaws {
+fact GroupInverseLeftLaw {
   some r: LawRequirement | r.structure = Group and r.requiredLaw = InverseLeft
+}
+
+fact GroupInverseRightLaw {
   some r: LawRequirement | r.structure = Group and r.requiredLaw = InverseRight
 }
 
