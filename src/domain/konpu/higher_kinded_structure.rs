@@ -6,7 +6,7 @@ pub enum HigherKindedStructure {
 }
 
 impl HigherKindedStructure {
-    pub fn hk_rank(&self) -> i64 {
+    pub const fn hkRank(&self) -> i64 {
         match self {
             Self::Functor => 1,
             Self::Applicative => 2,

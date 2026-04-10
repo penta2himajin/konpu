@@ -7,7 +7,7 @@ pub enum AlgebraicStructure {
 }
 
 impl AlgebraicStructure {
-    pub fn rank(&self) -> i64 {
+    pub const fn rank(&self) -> i64 {
         match self {
             Self::Magma => 0,
             Self::Semigroup => 1,
