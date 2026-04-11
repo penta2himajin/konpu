@@ -63,7 +63,7 @@ pub fn default_operation_name() -> OperationName {
     OperationName
 }
 
-/// Factory: create a default valid AlgebraicDeclaration (Magma — no identity/inverse required)
+/// Factory: create a default valid AlgebraicDeclaration
 #[allow(dead_code)]
 pub fn default_algebraic_declaration() -> AlgebraicDeclaration {
     AlgebraicDeclaration {
@@ -79,39 +79,12 @@ pub fn default_algebraic_declaration() -> AlgebraicDeclaration {
 #[allow(dead_code)]
 pub fn default_law_requirement() -> LawRequirement {
     LawRequirement {
-        structure: AlgebraicStructure::Semigroup,
-        requiredLaw: Law::Associativity,
+        structure: default_algebraic_structure(),
+        requiredLaw: default_law(),
     }
 }
 
-/// Factory: create all required law requirements
-#[allow(dead_code)]
-pub fn all_law_requirements() -> Vec<LawRequirement> {
-    vec![
-        LawRequirement {
-            structure: AlgebraicStructure::Semigroup,
-            requiredLaw: Law::Associativity,
-        },
-        LawRequirement {
-            structure: AlgebraicStructure::Monoid,
-            requiredLaw: Law::LeftIdentity,
-        },
-        LawRequirement {
-            structure: AlgebraicStructure::Monoid,
-            requiredLaw: Law::RightIdentity,
-        },
-        LawRequirement {
-            structure: AlgebraicStructure::Group,
-            requiredLaw: Law::InverseLeft,
-        },
-        LawRequirement {
-            structure: AlgebraicStructure::Group,
-            requiredLaw: Law::InverseRight,
-        },
-    ]
-}
-
-/// Factory: create a default valid LawTest (Semigroup + Associativity)
+/// Factory: create a default valid LawTest
 #[allow(dead_code)]
 pub fn default_law_test() -> LawTest {
     LawTest {
@@ -136,28 +109,22 @@ pub fn default_ignore_annotation() -> IgnoreAnnotation {
     }
 }
 
-/// Factory: create a default valid Diagnostic (non-ignored declaration)
+/// Factory: create a default valid Diagnostic
 #[allow(dead_code)]
 pub fn default_diagnostic() -> Diagnostic {
     Diagnostic {
-        severity: Severity::Error,
-        declaration: AlgebraicDeclaration {
-            targetStructure: AlgebraicStructure::Semigroup,
-            higherKinded: None,
-            operationName: OperationName,
-            identityName: None,
-            inverseName: None,
-        },
-        rule: DiagnosticRule::MissingIdentity,
+        severity: default_severity(),
+        declaration: default_algebraic_declaration(),
+        rule: default_diagnostic_rule(),
     }
 }
 
-/// Factory: create a default valid ContextType (Finite with positive count)
+/// Factory: create a default valid ContextType
 #[allow(dead_code)]
 pub fn default_context_type() -> ContextType {
     ContextType {
-        propagation: PropagationSize::Finite,
-        variantCount: Some(1),
+        propagation: default_propagation_size(),
+        variantCount: Some(1i64),
     }
 }
 
@@ -183,8 +150,8 @@ pub fn default_layer_expectation() -> LayerExpectation {
 pub fn default_compliance_report() -> ComplianceReport {
     ComplianceReport {
         declaration: default_algebraic_declaration(),
-        totalLaws: 1,
-        passingLaws: 0,
+        totalLaws: 1i64,
+        passingLaws: 0i64,
     }
 }
 
@@ -197,4 +164,31 @@ pub fn anomaly_empty_layer_expectation() -> LayerExpectation {
         expectedHigherKinded: BTreeSet::new(),
         maxPropagation: None,
     }
+}
+
+/// Factory: all required law requirements (from Alloy facts)
+#[allow(dead_code)]
+pub fn all_law_requirements() -> Vec<LawRequirement> {
+    vec![
+        LawRequirement {
+            structure: AlgebraicStructure::Semigroup,
+            requiredLaw: Law::Associativity,
+        },
+        LawRequirement {
+            structure: AlgebraicStructure::Monoid,
+            requiredLaw: Law::LeftIdentity,
+        },
+        LawRequirement {
+            structure: AlgebraicStructure::Monoid,
+            requiredLaw: Law::RightIdentity,
+        },
+        LawRequirement {
+            structure: AlgebraicStructure::Group,
+            requiredLaw: Law::InverseLeft,
+        },
+        LawRequirement {
+            structure: AlgebraicStructure::Group,
+            requiredLaw: Law::InverseRight,
+        },
+    ]
 }
