@@ -203,6 +203,17 @@ fn main() {
             for (r, n) in &by_ignore_reason {
                 println!("  {r}: {n}");
             }
+            println!("expectation mismatches: {}", result.expectation_mismatches.len());
+            for m in &result.expectation_mismatches {
+                println!(
+                    "  [{}] {}:{}: {} — {}",
+                    m.layer_name,
+                    m.path.display(),
+                    m.line,
+                    m.type_name,
+                    m.reason
+                );
+            }
         }
     }
 }

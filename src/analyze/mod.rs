@@ -30,6 +30,7 @@ pub struct AnalysisResult {
     pub declarations: Vec<extract::AnalyzedDeclaration>,
     pub impls: Vec<extract::ImplInfo>,
     pub law_tests: Vec<extract::LawTestInfo>,
+    pub expectation_mismatches: Vec<template::LayerExpectationMismatch>,
 }
 
 /// `konpu.toml` 由来の設定を適用して解析する。
@@ -87,6 +88,45 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
     for (path, line, diag) in check::check_law_tests(&all_decls, &all_law_tests) {
         out.push(AnalyzedDiagnostic { path, line, diag });
     }
+    let mut mismatches = Vec::new();
+    for decl in &all_decls {
+        let Some(layer) = template::match_layer(config, &decl.path) else {
+            continue;
+        };
+        if !layer.expect_structures.is_empty()
+            && !layer.expect_structures.contains(&decl.target_structure)
+        {
+            let expected: Vec<String> =
+                layer.expect_structures.iter().map(|s| format!("{s:?}")).collect();
+            mismatches.push(template::LayerExpectationMismatch {
+                layer_name: layer.name.clone(),
+                path: decl.path.clone(),
+                line: decl.line,
+                type_name: decl.type_name.clone(),
+                reason: format!(
+                    "expected one of [{}], got {:?}",
+                    expected.join(", "),
+                    decl.target_structure
+                ),
+            });
+        }
+        if let Some(hk) = &decl.higher_kinded {
+            if !layer.expect_higher.is_empty() && !layer.expect_higher.contains(hk) {
+                let expected: Vec<String> =
+                    layer.expect_higher.iter().map(|s| format!("{s:?}")).collect();
+                mismatches.push(template::LayerExpectationMismatch {
+                    layer_name: layer.name.clone(),
+                    path: decl.path.clone(),
+                    line: decl.line,
+                    type_name: decl.type_name.clone(),
+                    reason: format!(
+                        "expected higher-kinded one of [{}], got {hk:?}",
+                        expected.join(", ")
+                    ),
+                });
+            }
+        }
+    }
     out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
     AnalysisResult {
         diagnostics: out,
@@ -94,5 +134,6 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
         declarations: all_decls,
         impls: all_impls,
         law_tests: all_law_tests,
+        expectation_mismatches: mismatches,
     }
 }

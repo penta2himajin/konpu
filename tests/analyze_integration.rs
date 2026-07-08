@@ -186,3 +186,46 @@ fn ignores_extracted_with_reason() {
     assert_eq!(ig.reason, IgnoreReason::Intentional);
     assert_eq!(ig.note.as_deref(), Some("skipped for now"));
 }
+
+#[test]
+fn layer_expectation_mismatch_detected_for_ddd() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    use konpu::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
+    let cfg = template::parse("preset = \"ddd\"\n");
+    // Build a user layer that points at our fixture file. The DDD preset's
+    // `domain` layer expects Monoid|Group; we declare magma, so it should
+    // produce an expectation_mismatch.
+    let user = template::parse(
+        "preset = \"ddd\"\n[layers.domain]\npath = \"src/analyze/fixtures/layer_expectation_mismatch.rs\"\nexpect = [\"monoid\", \"group\"]\n",
+    );
+    let _ = cfg;
+    let result = analyze_full(
+        &fixture("layer_expectation_mismatch.rs"),
+        &user,
+    );
+    assert_eq!(result.expectation_mismatches.len(), 1);
+    let m = &result.expectation_mismatches[0];
+    assert_eq!(m.layer_name, "domain");
+    assert_eq!(m.type_name, "WeakDomain");
+    assert!(m.reason.contains("Magma"));
+    // the DDD domain layer does not require higher-kinded, so no higher mismatch
+    assert!(!result.expectation_mismatches.iter().any(|m| m.reason.contains("higher")));
+    let _ = (AlgebraicStructure::Magma, HigherKindedStructure::Functor);
+}
+
+#[test]
+fn layer_expectation_mismatch_for_higher_kinded() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    // infra layer expects `functor` higher; fixture declares `applicative` higher.
+    let cfg = template::parse(
+        "preset = \"ddd\"\n[layers.infra]\npath = \"src/analyze/fixtures/higher_mismatch.rs\"\nexpect = [\"functor\"]\n",
+    );
+    let result = analyze_full(&fixture("higher_mismatch.rs"), &cfg);
+    let higher_mismatch = result
+        .expectation_mismatches
+        .iter()
+        .find(|m| m.reason.contains("higher"));
+    assert!(higher_mismatch.is_some(), "expected a higher-kinded mismatch, got: {:?}", result.expectation_mismatches);
+}

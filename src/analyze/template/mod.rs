@@ -11,12 +11,22 @@
 //! max_propagation = 4
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::domain::konpu::AlgebraicStructure;
 use crate::domain::konpu::HigherKindedStructure;
+
+/// 層の expectation に対する違反 (Info 相当)。`analyze_full` で収集。
+#[derive(Debug, Clone)]
+pub struct LayerExpectationMismatch {
+    pub layer_name: String,
+    pub path: PathBuf,
+    pub line: usize,
+    pub type_name: String,
+    pub reason: String,
+}
 
 /// `konpu.toml` のトップレベル。
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -213,7 +223,10 @@ pub fn match_layer<'a>(
     config: &'a ResolvedConfig,
     file_path: &Path,
 ) -> Option<&'a ResolvedLayer> {
-    let s = file_path.to_string_lossy();
+    let rel = file_path
+        .strip_prefix(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or(file_path);
+    let s = rel.to_string_lossy();
     config.layers.iter().find(|l| {
         !l.path_pattern.is_empty() && glob_match(&l.path_pattern, &s)
     })
