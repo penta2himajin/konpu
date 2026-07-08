@@ -1,6 +1,7 @@
 pub mod check;
 pub mod extract;
 pub mod parser;
+pub mod propagation;
 
 use std::path::{Path, PathBuf};
 
