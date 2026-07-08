@@ -51,3 +51,16 @@ fn confidence_info() {
     assert_eq!(count(&diags, Severity::Info, DiagnosticRule::AssociativityConfidence), 1);
     assert_eq!(count(&diags, Severity::Error, DiagnosticRule::ClosureViolation), 0);
 }
+
+#[test]
+fn monoid_missing_identity_suppresses_info() {
+    let diags = analyze_path(&fixture("monoid_missing_identity.rs"));
+    assert_eq!(count(&diags, Severity::Error, DiagnosticRule::MissingIdentity), 1);
+    assert_eq!(count(&diags, Severity::Info, DiagnosticRule::AssociativityConfidence), 0);
+}
+
+#[test]
+fn functor_sig_violation() {
+    let diags = analyze_path(&fixture("functor_sig_violation.rs"));
+    assert_eq!(count(&diags, Severity::Error, DiagnosticRule::MapSignatureViolation), 1);
+}

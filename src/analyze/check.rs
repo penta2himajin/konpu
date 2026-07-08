@@ -25,9 +25,12 @@ pub fn check_declaration(
         .flat_map(|i| i.methods.iter())
         .find(|m| m.name == decl.operation_name);
 
+    let mut had_error = false;
+
     if decl.target_structure.rank() >= 2 {
         let id_name = decl.identity_name.as_deref();
         if id_name.is_none() || !has_method(&matching, id_name.unwrap_or("")) {
+            had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
                 declaration: declaration.clone(),
@@ -39,6 +42,7 @@ pub fn check_declaration(
     if decl.target_structure.rank() >= 3 {
         let inv_name = decl.inverse_name.as_deref();
         if inv_name.is_none() || !has_method(&matching, inv_name.unwrap_or("")) {
+            had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
                 declaration: declaration.clone(),
@@ -65,12 +69,13 @@ pub fn check_declaration(
             violated = true;
         }
         if violated {
+            had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
                 declaration: declaration.clone(),
                 rule: DiagnosticRule::ClosureViolation,
             });
-        } else if op_returns_self(decl, op) {
+        } else if !had_error && op_returns_self(decl, op) {
             out.push(Diagnostic {
                 severity: Severity::Info,
                 declaration: declaration.clone(),
@@ -79,6 +84,31 @@ pub fn check_declaration(
         }
     }
 
+    if decl.higher_kinded.is_some() {
+        let map_method = matching
+            .iter()
+            .flat_map(|i| i.methods.iter())
+            .find(|m| m.name == "map");
+        if let Some(map) = map_method {
+            let map_violation = map.self_param == Some(SelfKind::MutRef)
+                || map
+                    .return_type
+                    .as_deref()
+                    .is_none_or(|t| t.trim() == "()" || t.trim().is_empty())
+                || (!map.is_assoc_fn && map.params.len() != 1)
+                || (map.is_assoc_fn && map.params.len() != 2);
+            if map_violation {
+                had_error = true;
+                out.push(Diagnostic {
+                    severity: Severity::Error,
+                    declaration: declaration.clone(),
+                    rule: DiagnosticRule::MapSignatureViolation,
+                });
+            }
+        }
+    }
+
+    let _ = had_error;
     out
 }
 
