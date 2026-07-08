@@ -1,0 +1,13 @@
+error: #[konpu::ignore] requires `reason = "<intentional|debt|infeasible>"`
+ --> tests/ui/fail_ignore_missing_reason.rs:1:1
+  |
+1 | #[konpu::ignore(note = "missing reason")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `konpu::ignore` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_ignore_missing_reason.rs:2:25
+  |
+2 | fn ignore_no_reason() {}
+  |                         ^ consider adding a `main` function to `$DIR/tests/ui/fail_ignore_missing_reason.rs`

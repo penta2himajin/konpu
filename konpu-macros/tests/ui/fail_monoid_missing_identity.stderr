@@ -1,0 +1,13 @@
+error: #[konpu::monoid] requires `identity = "<name>"`
+ --> tests/ui/fail_monoid_missing_identity.rs:1:1
+  |
+1 | #[konpu::monoid(op = "concat")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `konpu::monoid` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_monoid_missing_identity.rs:2:24
+  |
+2 | struct MissingIdentity;
+  |                        ^ consider adding a `main` function to `$DIR/tests/ui/fail_monoid_missing_identity.rs`

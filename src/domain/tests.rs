@@ -1,11 +1,10 @@
 #[cfg(test)]
 mod property_tests {
-    #[allow(unused_imports)]
+    #![allow(unused_imports)]
     use crate::domain::fixtures::*;
     use crate::domain::konpu::diagnostic_rule::DiagnosticRule::*;
     use crate::domain::konpu::propagation_size::PropagationSize::*;
     use crate::domain::konpu::severity::Severity::*;
-    #[allow(unused_imports)]
     use crate::domain::konpu::*;
 
     #[test]

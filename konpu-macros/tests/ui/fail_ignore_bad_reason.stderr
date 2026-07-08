@@ -1,0 +1,11 @@
+error: `reason` must be "intentional", "debt", or "infeasible"
+ --> tests/ui/fail_ignore_bad_reason.rs:1:26
+  |
+1 | #[konpu::ignore(reason = "??")]
+  |                          ^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_ignore_bad_reason.rs:2:26
+  |
+2 | fn ignore_bad_reason() {}
+  |                          ^ consider adding a `main` function to `$DIR/tests/ui/fail_ignore_bad_reason.rs`

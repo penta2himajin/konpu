@@ -20,8 +20,26 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Check { path } => {
-            println!("konpu check: {path}");
-            println!("not yet implemented");
+            use konpu::analyze::analyze_path;
+            use konpu::domain::konpu::Severity;
+            let p = std::path::PathBuf::from(path);
+            let diagnostics = analyze_path(&p);
+            if diagnostics.is_empty() {
+                println!("konpu check: no violations");
+                return;
+            }
+            for d in &diagnostics {
+                println!(
+                    "{}:{}: {:?} {:?} target={:?}",
+                    d.path.display(),
+                    d.line,
+                    d.diag.severity,
+                    d.diag.rule,
+                    d.diag.declaration.targetStructure
+                );
+            }
+            let has_error = diagnostics.iter().any(|d| d.diag.severity == Severity::Error);
+            std::process::exit(if has_error { 1 } else { 0 });
         }
     }
 }

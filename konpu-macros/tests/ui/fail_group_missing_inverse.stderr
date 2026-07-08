@@ -1,0 +1,13 @@
+error: #[konpu::group] requires `inverse = "<name>"`
+ --> tests/ui/fail_group_missing_inverse.rs:1:1
+  |
+1 | #[konpu::group(op = "op", identity = "empty")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `konpu::group` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_group_missing_inverse.rs:2:23
+  |
+2 | struct MissingInverse;
+  |                       ^ consider adding a `main` function to `$DIR/tests/ui/fail_group_missing_inverse.rs`

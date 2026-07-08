@@ -1,0 +1,13 @@
+error: `identity` must differ from `op`
+ --> tests/ui/fail_identity_eq_op.rs:1:1
+  |
+1 | #[konpu::monoid(op = "op", identity = "op")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `konpu::monoid` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_identity_eq_op.rs:2:21
+  |
+2 | struct IdentityEqOp;
+  |                     ^ consider adding a `main` function to `$DIR/tests/ui/fail_identity_eq_op.rs`

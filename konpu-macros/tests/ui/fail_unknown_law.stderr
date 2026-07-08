@@ -1,0 +1,11 @@
+error: unknown law `foobar`
+ --> tests/ui/fail_unknown_law.rs:1:14
+  |
+1 | #[konpu::law(foobar)]
+  |              ^^^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/ui/fail_unknown_law.rs:2:20
+  |
+2 | fn unknown_law() {}
+  |                    ^ consider adding a `main` function to `$DIR/tests/ui/fail_unknown_law.rs`
