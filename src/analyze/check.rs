@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use crate::domain::konpu::{
     AlgebraicDeclaration, AlgebraicStructure, Diagnostic, DiagnosticRule, Law, OperationName,
-    Severity,
+    PropagationSize, Severity,
 };
 use crate::domain::fixtures::all_law_requirements;
 
 use super::extract::{AnalyzedDeclaration, ImplInfo, LawTestInfo, SelfKind};
+use super::template::{self, ResolvedConfig};
 
 pub fn check_declaration(
     decl: &AnalyzedDeclaration,
@@ -218,6 +219,39 @@ pub fn check_law_tests(
                 ));
             }
         }
+    }
+    out
+}
+
+/// 文脈伝播度の上限を超過している場合、`PropagationExceeded` (Warning) を出す。
+pub fn check_propagation(
+    decl: &AnalyzedDeclaration,
+    config: &ResolvedConfig,
+) -> Vec<Diagnostic> {
+    let Some(size) = &decl.propagation else {
+        return Vec::new();
+    };
+    let layer = template::match_layer(config, &decl.path);
+    let threshold = template::threshold(config, layer);
+    let declaration = AlgebraicDeclaration {
+        targetStructure: decl.target_structure.clone(),
+        higherKinded: decl.higher_kinded.clone(),
+        operationName: OperationName,
+        identityName: None,
+        inverseName: None,
+    };
+    let mut out = Vec::new();
+    match threshold {
+        None => {}
+        Some(-1) => {}
+        Some(max) if max > 0 && size == &PropagationSize::Unbounded => {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                declaration,
+                rule: DiagnosticRule::PropagationExceeded,
+            });
+        }
+        _ => {}
     }
     out
 }

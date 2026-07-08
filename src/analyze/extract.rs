@@ -14,6 +14,8 @@ pub struct AnalyzedDeclaration {
     pub inverse_name: Option<String>,
     pub path: std::path::PathBuf,
     pub line: usize,
+    /// 文脈伝播度（Phase 1-B で算出）。未算出なら None。
+    pub propagation: Option<crate::domain::konpu::PropagationSize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,7 @@ fn parse_konpu_args(attr_text: &str, structure: AlgebraicStructure) -> AnalyzedD
         inverse_name: inverse,
         path: std::path::PathBuf::new(),
         line: 0,
+        propagation: None,
     }
 }
 

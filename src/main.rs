@@ -13,17 +13,24 @@ enum Commands {
     Check {
         /// Path to analyze
         path: String,
+        /// Path to konpu.toml (default: ./konpu.toml if present)
+        #[arg(long)]
+        config: Option<String>,
     },
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { path } => {
-            use konpu::analyze::analyze_path;
+        Commands::Check { path, config } => {
+            use konpu::analyze::template;
             use konpu::domain::konpu::Severity;
             let p = std::path::PathBuf::from(path);
-            let diagnostics = analyze_path(&p);
+            let config_path = config
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let resolved = template::load(&config_path);
+            let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
             if diagnostics.is_empty() {
                 println!("konpu check: no violations");
                 return;

@@ -8,6 +8,8 @@ clap = { version = "4", features = ["derive"] }
 konpu-macros = { path = "konpu-macros" }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24.2"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 [workspace]
 members = ["konpu-macros"]

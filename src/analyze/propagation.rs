@@ -39,11 +39,6 @@ fn text_of(node: Node, source: &str) -> String {
         .unwrap_or_default()
 }
 
-fn child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut cur = node.walk();
-    node.children(&mut cur).find(|c| c.kind() == kind)
-}
-
 /// tree-sitter AST から struct/enum 定義を抽出する。
 pub fn extract_type_infos(root: Node, source: &str) -> Vec<TypeInfo> {
     let mut out = Vec::new();
@@ -78,7 +73,7 @@ fn type_name_of(item: Node, source: &str) -> Option<String> {
 
 fn parse_struct(node: Node, source: &str) -> Option<TypeInfo> {
     let name = type_name_of(node, source)?;
-    let body = child_by_kind(node, "declaration_list")?;
+    let body = find_body(node)?;
     let mut field_types = Vec::new();
     let mut cur = body.walk();
     for child in body.children(&mut cur) {
@@ -98,7 +93,7 @@ fn parse_struct(node: Node, source: &str) -> Option<TypeInfo> {
 
 fn parse_enum(node: Node, source: &str) -> Option<TypeInfo> {
     let name = type_name_of(node, source)?;
-    let body = child_by_kind(node, "variant_list")?;
+    let body = find_body(node)?;
     let mut variant_count = 0;
     let mut cur = body.walk();
     for child in body.children(&mut cur) {
@@ -111,6 +106,16 @@ fn parse_enum(node: Node, source: &str) -> Option<TypeInfo> {
         kind: TypeKind::Enum,
         variant_count,
         field_types: Vec::new(),
+    })
+}
+
+fn find_body(node: Node) -> Option<Node> {
+    let mut cur = node.walk();
+    node.children(&mut cur).find(|c| {
+        matches!(
+            c.kind(),
+            "declaration_list" | "field_declaration_list" | "variant_list"
+        )
     })
 }
 

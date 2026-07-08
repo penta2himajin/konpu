@@ -1,4 +1,4 @@
-use konpu::analyze::analyze_path;
+use konpu::analyze::{analyze_path, analyze_with_config, template};
 use konpu::domain::konpu::{DiagnosticRule, Severity};
 
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -83,4 +83,29 @@ fn monoid_partial_law_tests_warns() {
     // Monoid rank 2 includes Semigroup{Associativity} + Monoid{LeftIdentity, RightIdentity} = 3 laws.
     // Only left_identity is present → 2 missing.
     assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::MissingLawTest), 2);
+}
+
+#[test]
+fn propagation_exceeded_when_unbounded_under_threshold() {
+    let config = template::parse(
+        "[defaults]\nmax_propagation = 4\n",
+    );
+    let diags = analyze_with_config(&fixture("propagation_exceeded.rs"), &config);
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::PropagationExceeded), 1);
+}
+
+#[test]
+fn propagation_ok_when_no_threshold() {
+    let config = template::ResolvedConfig::empty();
+    let diags = analyze_with_config(&fixture("propagation_exceeded.rs"), &config);
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::PropagationExceeded), 0);
+}
+
+#[test]
+fn propagation_unlimited_threshold_allows_unbounded() {
+    let config = template::parse(
+        "[defaults]\nmax_propagation = -1\n",
+    );
+    let diags = analyze_with_config(&fixture("propagation_exceeded.rs"), &config);
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::PropagationExceeded), 0);
 }
