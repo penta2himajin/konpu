@@ -244,3 +244,51 @@ fn boundary_violation_when_to_layer_imports_from_keyword() {
         result.boundary_violations
     );
 }
+
+#[test]
+fn boundary_preserve_violation_when_to_loses_monoid_rank() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    // domain_thing is monoid, infra_thing is also monoid with same name
+    // "InfraThing" — but we want a violation: we declare DomainThing (monoid)
+    // in from, and InfraThing (monoid) in to. The violation fires when the
+    // same-named struct in `to` has a LOWER rank than `from`. We use distinct
+    // names in a separate temp fixture to trigger the rank-difference path:
+    // `from` declares Entity as monoid, `to` declares Entity as semigroup.
+    // We do this by writing the to-file with semigroup annotation and naming
+    // the type to match domain_thing's name? domain_thing is `DomainThing`,
+    // not generic. To avoid a temp file, we instead check the case where
+    // domain_thing (monoid rank 2) and infra_thing (monoid rank 2) are both
+    // present, and the SAME NAME comparison holds with no rank loss — should
+    // produce no preserve violation. So we instead create a temp fixture
+    // pair in a function-local scope via std::env::temp_dir.
+    let dir = std::env::temp_dir().join("konpu_preserve_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let from_path = dir.join("entity.rs");
+    let to_path = dir.join("repo.rs");
+    std::fs::write(
+        &from_path,
+        "#[konpu::monoid(op = \"op\", identity = \"empty\")]\npub struct Entity;\nimpl Entity { pub fn op(self, _o: Self) -> Self { Self } pub fn empty() -> Self { Self } }\n",
+    ).unwrap();
+    std::fs::write(
+        &to_path,
+        "#[konpu::semigroup(op = \"op\")]\npub struct Entity;\nimpl Entity { pub fn op(self, _o: Self) -> Self { Self } }\n",
+    ).unwrap();
+    let cfg = template::parse(&format!(
+        "[boundaries.d]\nfrom = \"{}/entity.rs\"\nto = \"{}/repo.rs\"\npreserve = [\"monoid\"]\n",
+        dir.display(),
+        dir.display()
+    ));
+    let result = analyze_full(&dir, &cfg);
+    assert!(
+        result
+            .boundary_violations
+            .iter()
+            .any(|v| v.reason.contains("preserve violation")),
+        "expected a preserve violation, got: {:?}",
+        result.boundary_violations
+    );
+    std::fs::remove_file(&from_path).ok();
+    std::fs::remove_file(&to_path).ok();
+    std::fs::remove_dir(&dir).ok();
+}

@@ -158,6 +158,53 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
                 });
             }
         }
+        // `preserve` check (Phase 2-A minimum): for each AlgebraicStructure
+        // declared in `from` layer with `target_structure` ∈ boundary.preserve,
+        // check whether a same-named struct exists in `to` layer. If it does
+        // and is NOT annotated with the same AlgebraicStructure, emit a
+        // BoundaryPreserveWarning. If no same-named struct exists, that's
+        // outside the scope of static-without-call-graph — we skip silently
+        // (this minimum does not prove absence of preservation).
+        if b.preserve.is_empty() {
+            continue;
+        }
+        let from_decls: Vec<&extract::AnalyzedDeclaration> = all_decls
+            .iter()
+            .filter(|d| {
+                glob_match_path(&b.from_pattern, &d.path)
+                    && b.preserve.contains(&d.target_structure)
+            })
+            .collect();
+        if from_decls.is_empty() {
+            continue;
+        }
+        let to_decls: Vec<&extract::AnalyzedDeclaration> = all_decls
+            .iter()
+            .filter(|d| glob_match_path(&b.to_pattern, &d.path))
+            .collect();
+        for fd in &from_decls {
+            for td in &to_decls {
+                if fd.type_name == td.type_name
+                    && fd.target_structure.rank() > td.target_structure.rank()
+                {
+                    boundary_violations.push(template::BoundaryViolation {
+                        boundary_name: b.name.clone(),
+                        from_path: fd.path.clone(),
+                        to_path: td.path.clone(),
+                        line: td.line,
+                        imported_path: String::new(),
+                        reason: format!(
+                            "preserve violation: `from` layer declares `{}` as {:?} (rank {}); `to` layer has same-named type but only as {:?} (rank {})",
+                            fd.type_name,
+                            fd.target_structure,
+                            fd.target_structure.rank(),
+                            td.target_structure,
+                            td.target_structure.rank()
+                        ),
+                    });
+                }
+            }
+        }
     }
     AnalysisResult {
         diagnostics: out,
