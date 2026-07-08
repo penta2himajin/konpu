@@ -16,6 +16,10 @@ enum Commands {
         /// Path to konpu.toml (default: ./konpu.toml if present)
         #[arg(long)]
         config: Option<String>,
+        /// Path to baseline file (default: .konpu/baseline.json if present).
+        /// When set, only diagnostics NOT in the baseline are reported.
+        #[arg(long)]
+        baseline: Option<String>,
     },
     /// Generate law-test skeletons for annotated declarations
     Scaffold {
@@ -28,12 +32,32 @@ enum Commands {
         #[arg(long)]
         write: bool,
     },
+    /// Record all current violations into a baseline file
+    Baseline {
+        /// Path to analyze
+        path: String,
+        /// Path to konpu.toml (default: ./konpu.toml if present)
+        #[arg(long)]
+        config: Option<String>,
+        /// Output path for the baseline (default: .konpu/baseline.json)
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Print a summary: diagnostics, ignores, declarations
+    Report {
+        /// Path to analyze
+        path: String,
+        /// Path to konpu.toml (default: ./konpu.toml if present)
+        #[arg(long)]
+        config: Option<String>,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { path, config } => {
+        Commands::Check { path, config, baseline } => {
+            use konpu::analyze::baseline;
             use konpu::analyze::template;
             use konpu::domain::konpu::Severity;
             let p = std::path::PathBuf::from(path);
@@ -42,6 +66,22 @@ fn main() {
                 .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
             let resolved = template::load(&config_path);
             let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
+            let baseline_path = baseline
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(baseline::default_path);
+            let bl = baseline::load(&baseline_path);
+            let (diagnostics, _hidden) = if bl.is_empty() {
+                (diagnostics, 0usize)
+            } else {
+                let new_count = diagnostics
+                    .iter()
+                    .filter(|d| {
+                        !bl.contains(&baseline::BaselineEntry::from_diag(d))
+                    })
+                    .count();
+                let new_diags = baseline::filter_new(diagnostics, &bl);
+                (new_diags, new_count)
+            };
             if diagnostics.is_empty() {
                 println!("konpu check: no violations");
                 return;
@@ -95,6 +135,74 @@ fn main() {
                 test_total,
                 if write { " written" } else { " (dry-run, pass --write to emit)" }
             );
+        }
+        Commands::Baseline { path, config, out } => {
+            use konpu::analyze::baseline;
+            use konpu::analyze::template;
+            let p = std::path::PathBuf::from(path);
+            let config_path = config
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let resolved = template::load(&config_path);
+            let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
+            let out_path = out.map(std::path::PathBuf::from).unwrap_or_else(baseline::default_path);
+            let entries = baseline::entries_from(&diagnostics);
+            match baseline::save(&out_path, &entries) {
+                Ok(()) => {
+                    println!(
+                        "konpu baseline: {} entry(s) written to {}",
+                        entries.len(),
+                        out_path.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("konpu baseline: failed to write {}: {e}", out_path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Report { path, config } => {
+            use konpu::analyze::template;
+            use konpu::domain::konpu::Severity;
+            use std::collections::BTreeMap;
+            let p = std::path::PathBuf::from(path);
+            let config_path = config
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let resolved = template::load(&config_path);
+            let result = konpu::analyze::analyze_full(&p, &resolved);
+            let mut by_sev: BTreeMap<Severity, usize> = BTreeMap::new();
+            let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
+            for d in &result.diagnostics {
+                *by_sev.entry(d.diag.severity.clone()).or_insert(0) += 1;
+                *by_rule.entry(format!("{:?}", d.diag.rule)).or_insert(0) += 1;
+            }
+            let mut by_ignore_reason: BTreeMap<String, usize> = BTreeMap::new();
+            for ig in &result.ignores {
+                let key = format!("{:?}", ig.reason);
+                *by_ignore_reason.entry(key).or_insert(0) += 1;
+            }
+            println!("== konpu report ==");
+            println!("path: {}", p.display());
+            println!(
+                "config: {} layer(s), defaults_max_propagation: {:?}",
+                resolved.layers.len(),
+                resolved.defaults_max
+            );
+            println!("declarations: {}", result.declarations.len());
+            println!("impls: {}", result.impls.len());
+            println!("law tests: {}", result.law_tests.len());
+            println!("diagnostics: {}", result.diagnostics.len());
+            for (s, n) in &by_sev {
+                println!("  {s:?}: {n}");
+            }
+            for (r, n) in &by_rule {
+                println!("  rule {r}: {n}");
+            }
+            println!("ignores: {}", result.ignores.len());
+            for (r, n) in &by_ignore_reason {
+                println!("  {r}: {n}");
+            }
         }
     }
 }

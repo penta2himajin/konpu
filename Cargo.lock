@@ -176,6 +176,7 @@ dependencies = [
  "clap",
  "konpu-macros",
  "serde",
+ "serde_json",
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-rust",

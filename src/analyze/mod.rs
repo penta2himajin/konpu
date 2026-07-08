@@ -1,3 +1,4 @@
+pub mod baseline;
 pub mod check;
 pub mod extract;
 pub mod parser;
@@ -21,15 +22,31 @@ pub fn analyze_path(path: &Path) -> Vec<AnalyzedDiagnostic> {
     analyze_with_config(path, &template::ResolvedConfig::empty())
 }
 
+/// ベースラインと ignore を考慮してレポートに必要な情報を返す。
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisResult {
+    pub diagnostics: Vec<AnalyzedDiagnostic>,
+    pub ignores: Vec<extract::IgnoreInfo>,
+    pub declarations: Vec<extract::AnalyzedDeclaration>,
+    pub impls: Vec<extract::ImplInfo>,
+    pub law_tests: Vec<extract::LawTestInfo>,
+}
+
 /// `konpu.toml` 由来の設定を適用して解析する。
 pub fn analyze_with_config(
     path: &Path,
     config: &template::ResolvedConfig,
 ) -> Vec<AnalyzedDiagnostic> {
+    analyze_full(path, config).diagnostics
+}
+
+/// 診断以外の情報（ignore 抽出や declaration 収集）も返す統合 API。
+pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisResult {
     let files = parser::collect_rust_files(path);
     let mut all_decls = Vec::new();
     let mut all_impls = Vec::new();
     let mut all_law_tests = Vec::new();
+    let mut all_ignores = Vec::new();
     let mut all_type_infos = Vec::new();
     for file in &files {
         let Some((_, tree)) = parser::parse_file(file) else {
@@ -43,6 +60,7 @@ pub fn analyze_with_config(
         all_decls.extend(extract::extract_declarations(root, &source, file));
         all_impls.extend(extract::extract_impls(root, &source));
         all_law_tests.extend(extract::extract_law_tests(root, &source, file));
+        all_ignores.extend(extract::extract_ignores(root, &source, file));
         all_type_infos.extend(propagation::extract_type_infos(root, &source));
     }
     for decl in &mut all_decls {
@@ -70,5 +88,11 @@ pub fn analyze_with_config(
         out.push(AnalyzedDiagnostic { path, line, diag });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
-    out
+    AnalysisResult {
+        diagnostics: out,
+        ignores: all_ignores,
+        declarations: all_decls,
+        impls: all_impls,
+        law_tests: all_law_tests,
+    }
 }

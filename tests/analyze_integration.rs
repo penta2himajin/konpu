@@ -141,3 +141,48 @@ fn scaffold_skips_files_with_no_annotations() {
     let files = scaffold::scaffold_path(&p, &config);
     assert!(files.is_empty());
 }
+
+#[test]
+fn baseline_roundtrip_filters_known_violations() {
+    use konpu::analyze::baseline;
+    use konpu::analyze::analyze_with_config;
+    use konpu::analyze::template;
+    let cfg = template::ResolvedConfig::empty();
+    let diags = analyze_with_config(&fixture("monoid_missing_identity.rs"), &cfg);
+    assert!(!diags.is_empty());
+    let entries = baseline::entries_from(&diags);
+    let tmp = std::env::temp_dir().join("konpu_baseline_test.json");
+    baseline::save(&tmp, &entries).unwrap();
+    let bl = baseline::load(&tmp);
+    let filtered = baseline::filter_new(diags, &bl);
+    assert!(filtered.is_empty(), "expected no new violations after baseline, got {filtered:?}");
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn baseline_filter_keeps_new_violations() {
+    use konpu::analyze::baseline;
+    use konpu::analyze::analyze_with_config;
+    use konpu::analyze::template;
+    let cfg = template::ResolvedConfig::empty();
+    let diags_a = analyze_with_config(&fixture("monoid_missing_identity.rs"), &cfg);
+    // Build baseline from a different fixture
+    let diags_b = analyze_with_config(&fixture("monoid_valid.rs"), &cfg);
+    let entries = baseline::entries_from(&diags_b);
+    let bl: std::collections::HashSet<_> = entries.into_iter().collect();
+    let filtered = baseline::filter_new(diags_a, &bl);
+    assert!(!filtered.is_empty(), "expected new violations to remain");
+}
+
+#[test]
+fn ignores_extracted_with_reason() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    use konpu::domain::konpu::IgnoreReason;
+    let cfg = template::ResolvedConfig::empty();
+    let result = analyze_full(&fixture("with_ignore.rs"), &cfg);
+    assert_eq!(result.ignores.len(), 1);
+    let ig = &result.ignores[0];
+    assert_eq!(ig.reason, IgnoreReason::Intentional);
+    assert_eq!(ig.note.as_deref(), Some("skipped for now"));
+}

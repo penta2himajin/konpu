@@ -241,7 +241,10 @@ fn recurse_collect(
     seen: &mut std::collections::HashSet<(usize, String)>,
 ) {
     let is_attr = matches!(node.kind(), "attribute" | "attribute_item");
-    if is_attr {
+    let parent_is_attr = node
+        .parent()
+        .is_some_and(|p| matches!(p.kind(), "attribute" | "attribute_item"));
+    if is_attr && !parent_is_attr {
         let txt = text_of(node, source);
         if structure_from_attr(&txt).is_some() {
             let item = if let Some(parent) = node.parent() {
@@ -320,7 +323,11 @@ fn recurse_collect_laws(
     out: &mut Vec<LawTestInfo>,
     seen: &mut std::collections::HashSet<(usize, String)>,
 ) {
-    if matches!(node.kind(), "attribute" | "attribute_item") {
+    if matches!(node.kind(), "attribute" | "attribute_item")
+        && node
+            .parent()
+            .is_none_or(|p| !matches!(p.kind(), "attribute" | "attribute_item"))
+    {
         let txt = text_of(node, source);
         if txt.contains("konpu::law") {
             let line = node.start_position().row;
@@ -362,6 +369,100 @@ fn parse_law_attr(attr: Node, source: &str, path: &Path) -> Option<LawTestInfo> 
     Some(LawTestInfo {
         laws,
         enclosing_type,
+        path: path.to_path_buf(),
+        line: attr.start_position().row + 1,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct IgnoreInfo {
+    pub reason: crate::domain::konpu::IgnoreReason,
+    pub note: Option<String>,
+    pub type_name: Option<String>,
+    pub path: std::path::PathBuf,
+    pub line: usize,
+}
+
+pub fn ignore_reason_from_str(s: &str) -> Option<crate::domain::konpu::IgnoreReason> {
+    use crate::domain::konpu::IgnoreReason;
+    match s.trim() {
+        "intentional" => Some(IgnoreReason::Intentional),
+        "debt" => Some(IgnoreReason::Debt),
+        "infeasible" => Some(IgnoreReason::Infeasible),
+        _ => None,
+    }
+}
+
+pub fn extract_ignores(root: Node, source: &str, path: &Path) -> Vec<IgnoreInfo> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    recurse_collect_ignores(root, source, path, &mut out, &mut seen);
+    out
+}
+
+fn recurse_collect_ignores(
+    node: Node,
+    source: &str,
+    path: &Path,
+    out: &mut Vec<IgnoreInfo>,
+    seen: &mut std::collections::HashSet<(usize, String)>,
+) {
+    if matches!(node.kind(), "attribute" | "attribute_item")
+        && node
+            .parent()
+            .is_none_or(|p| !matches!(p.kind(), "attribute" | "attribute_item"))
+    {
+        let txt = text_of(node, source);
+        if txt.contains("konpu::ignore") {
+            let line = node.start_position().row;
+            let key = (line, txt.clone());
+            if seen.insert(key) {
+                if let Some(info) = parse_ignore_attr(node, source, path) {
+                    out.push(info);
+                }
+            }
+        }
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        recurse_collect_ignores(child, source, path, out, seen);
+    }
+}
+
+fn parse_ignore_attr(attr: Node, source: &str, path: &Path) -> Option<IgnoreInfo> {
+    let txt = text_of(attr, source);
+    let inside = txt.find('(').map(|i| {
+        let close = txt.rfind(')').unwrap_or(txt.len());
+        &txt[i + 1..close]
+    })?;
+    let mut reason = None;
+    let mut note: Option<String> = None;
+    for part in split_args(inside) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(eq) = part.find('=') {
+            let key = part[..eq].trim();
+            let val = part[eq + 1..].trim();
+            let val = strip_quotes(val);
+            match key {
+                "reason" => {
+                    if let Some(v) = val {
+                        reason = ignore_reason_from_str(&v);
+                    }
+                }
+                "note" => note = val,
+                _ => {}
+            }
+        }
+    }
+    let reason = reason?;
+    let type_name = enclosing_impl_type(attr, source);
+    Some(IgnoreInfo {
+        reason,
+        note,
+        type_name,
         path: path.to_path_buf(),
         line: attr.start_position().row + 1,
     })
