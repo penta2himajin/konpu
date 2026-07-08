@@ -109,3 +109,35 @@ fn propagation_unlimited_threshold_allows_unbounded() {
     let diags = analyze_with_config(&fixture("propagation_exceeded.rs"), &config);
     assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::PropagationExceeded), 0);
 }
+
+#[test]
+fn scaffold_generates_required_law_tests() {
+    use konpu::analyze::scaffold;
+    let config = template::ResolvedConfig::empty();
+    let files = scaffold::scaffold_path(&fixture("monoid_valid.rs"), &config);
+    assert_eq!(files.len(), 1);
+    let f = &files[0];
+    // Monoid accumulates Semigroup{Associativity} + Monoid{LeftIdentity,RightIdentity} = 3 tests
+    assert_eq!(f.decl_count, 1);
+    assert_eq!(f.test_count, 3);
+    let body = &f.contents;
+    assert!(body.contains("test_ValidMonoid_associativity"));
+    assert!(body.contains("test_ValidMonoid_left_identity"));
+    assert!(body.contains("test_ValidMonoid_right_identity"));
+    assert!(f.path.ends_with("monoid_valid_law_tests.rs"));
+}
+
+#[test]
+fn scaffold_skips_files_with_no_annotations() {
+    use konpu::analyze::scaffold;
+    let config = template::ResolvedConfig::empty();
+    // Empty fixture (no annotations) — we use the empty crate src for an
+    // annotate-free path: the `opencode.json` is non-Rust so collect_rust_files
+    // returns nothing; use the project's own root source dir which has no
+    // `#[konpu::*]` annotations in `src/main.rs` etc.
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("main.rs");
+    let files = scaffold::scaffold_path(&p, &config);
+    assert!(files.is_empty());
+}

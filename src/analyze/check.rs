@@ -156,7 +156,7 @@ fn op_returns_self(decl: &AnalyzedDeclaration, op: &super::extract::MethodInfo) 
     true
 }
 
-fn required_laws_for(structure: &AlgebraicStructure) -> Vec<Law> {
+pub fn required_laws_for(structure: &AlgebraicStructure) -> Vec<Law> {
     let mut out: Vec<Law> = all_law_requirements()
         .iter()
         .filter(|r| r.structure.rank() <= structure.rank())

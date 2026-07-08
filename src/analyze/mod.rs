@@ -2,6 +2,7 @@ pub mod check;
 pub mod extract;
 pub mod parser;
 pub mod propagation;
+pub mod scaffold;
 pub mod template;
 
 use std::path::{Path, PathBuf};
