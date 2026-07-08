@@ -31,6 +31,7 @@ pub struct AnalysisResult {
     pub impls: Vec<extract::ImplInfo>,
     pub law_tests: Vec<extract::LawTestInfo>,
     pub expectation_mismatches: Vec<template::LayerExpectationMismatch>,
+    pub boundary_violations: Vec<template::BoundaryViolation>,
 }
 
 /// `konpu.toml` 由来の設定を適用して解析する。
@@ -49,6 +50,7 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
     let mut all_law_tests = Vec::new();
     let mut all_ignores = Vec::new();
     let mut all_type_infos = Vec::new();
+    let mut all_uses = Vec::new();
     for file in &files {
         let Some((_, tree)) = parser::parse_file(file) else {
             continue;
@@ -63,6 +65,7 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
         all_law_tests.extend(extract::extract_law_tests(root, &source, file));
         all_ignores.extend(extract::extract_ignores(root, &source, file));
         all_type_infos.extend(propagation::extract_type_infos(root, &source));
+        all_uses.extend(extract::extract_use_statements(root, &source, file));
     }
     for decl in &mut all_decls {
         let (size, _count) = propagation::compute_propagation(&decl.type_name, &all_type_infos);
@@ -128,6 +131,34 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    let mut boundary_violations = Vec::new();
+    for b in &config.boundaries {
+        let from_key = from_pattern_key(&b.from_pattern);
+        for u in &all_uses {
+            let caller_path = u.path.clone();
+            let to_match = glob_match_path(&b.to_pattern, &caller_path);
+            if !to_match {
+                continue;
+            }
+            if from_key.is_empty() {
+                continue;
+            }
+            if imported_matches(&u.imported_path, &from_key) {
+                boundary_violations.push(template::BoundaryViolation {
+                    boundary_name: b.name.clone(),
+                    from_path: caller_path.clone(),
+                    to_path: caller_path.clone(),
+                    line: u.line,
+                    imported_path: u.imported_path.clone(),
+                    reason: format!(
+                        "{} (in `to` layer) imports `{from_key}` (in `from` layer); boundary `{}` permits `from` -> `to` only",
+                        caller_path.display(),
+                        b.name
+                    ),
+                });
+            }
+        }
+    }
     AnalysisResult {
         diagnostics: out,
         ignores: all_ignores,
@@ -135,5 +166,28 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
         impls: all_impls,
         law_tests: all_law_tests,
         expectation_mismatches: mismatches,
+        boundary_violations,
     }
+}
+
+fn glob_match_path(pattern: &str, file_path: &Path) -> bool {
+    let rel = file_path
+        .strip_prefix(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or(file_path);
+    let s = rel.to_string_lossy();
+    template::glob_match(pattern, &s)
+}
+
+fn from_pattern_key(from_pattern: &str) -> String {
+    from_pattern
+        .split("**")
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn imported_matches(imported_path: &str, from_key: &str) -> bool {
+    imported_path.contains(from_key)
+        || imported_path.replace("::", "/").contains(from_key)
 }

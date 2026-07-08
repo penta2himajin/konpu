@@ -214,6 +214,17 @@ fn main() {
                     m.reason
                 );
             }
+            println!("boundary violations: {}", result.boundary_violations.len());
+            for v in &result.boundary_violations {
+                println!(
+                    "  [{}] {}:{}: imports `{}` — {}",
+                    v.boundary_name,
+                    v.from_path.display(),
+                    v.line,
+                    v.imported_path,
+                    v.reason
+                );
+            }
         }
     }
 }

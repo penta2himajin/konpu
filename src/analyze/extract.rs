@@ -375,6 +375,42 @@ fn parse_law_attr(attr: Node, source: &str, path: &Path) -> Option<LawTestInfo> 
 }
 
 #[derive(Debug, Clone)]
+pub struct UseStatement {
+    pub path: std::path::PathBuf,
+    pub imported_path: String,
+    pub line: usize,
+}
+
+pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {
+    let mut out = Vec::new();
+    recurse_uses(root, source, path, &mut out);
+    out
+}
+
+fn recurse_uses(node: Node, source: &str, path: &Path, out: &mut Vec<UseStatement>) {
+    if node.kind() == "use_declaration" {
+        if let Some(u) = parse_use(node, source, path) {
+            out.push(u);
+        }
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        recurse_uses(child, source, path, out);
+    }
+}
+
+fn parse_use(node: Node, source: &str, path: &Path) -> Option<UseStatement> {
+    let text = text_of(node, source);
+    let line = node.start_position().row + 1;
+    let trimmed = text.trim().trim_start_matches("use").trim().trim_end_matches(';').trim();
+    Some(UseStatement {
+        path: path.to_path_buf(),
+        imported_path: trimmed.to_string(),
+        line,
+    })
+}
+
+#[derive(Debug, Clone)]
 pub struct IgnoreInfo {
     pub reason: crate::domain::konpu::IgnoreReason,
     pub note: Option<String>,

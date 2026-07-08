@@ -28,6 +28,38 @@ pub struct LayerExpectationMismatch {
     pub reason: String,
 }
 
+/// 層間境界 1 件分（roadmap §3.5 `[boundaries.<name>]`）。
+/// `from` 内ファイルから `to` 内ファイルへの参照 (use) は許可、
+/// 逆方向 (`to` 内から `from` への参照) は違反。
+/// `preserve` リストは保持されるべき代数的構造を宣言
+/// （Phase 2-A 範囲では警告のみ、法則の保存そのものの検査は Phase 2-A 拡張）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Boundary {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    #[serde(default)]
+    pub preserve: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedBoundary {
+    pub name: String,
+    pub from_pattern: String,
+    pub to_pattern: String,
+    pub preserve: Vec<AlgebraicStructure>,
+}
+
+/// 層間境界の違反 (Phase 2-A: 逆方向参照のみ)。
+#[derive(Debug, Clone)]
+pub struct BoundaryViolation {
+    pub boundary_name: String,
+    pub from_path: PathBuf,
+    pub to_path: PathBuf,
+    pub line: usize,
+    pub imported_path: String,
+    pub reason: String,
+}
+
 /// `konpu.toml` のトップレベル。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -36,6 +68,8 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default, rename = "layers")]
     pub layers: toml::Table,
+    #[serde(default, rename = "boundaries")]
+    pub boundaries: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -67,6 +101,7 @@ pub struct ResolvedLayer {
 pub struct ResolvedConfig {
     pub defaults_max: Option<i64>,
     pub layers: Vec<ResolvedLayer>,
+    pub boundaries: Vec<ResolvedBoundary>,
 }
 
 impl ResolvedConfig {
@@ -74,6 +109,7 @@ impl ResolvedConfig {
         Self {
             defaults_max: None,
             layers: Vec::new(),
+            boundaries: Vec::new(),
         }
     }
 }
@@ -125,9 +161,31 @@ pub fn parse(text: &str) -> ResolvedConfig {
             });
         }
     }
+    let mut boundaries = Vec::new();
+    for (name, v) in config.boundaries {
+        let b: Boundary = match v.try_into() {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let from = match b.from {
+            Some(f) => f,
+            None => continue,
+        };
+        let to = match b.to {
+            Some(t) => t,
+            None => continue,
+        };
+        boundaries.push(ResolvedBoundary {
+            name,
+            from_pattern: from,
+            to_pattern: to,
+            preserve: parse_structures(&b.preserve),
+        });
+    }
     ResolvedConfig {
         defaults_max: config.defaults.max_propagation,
         layers: preset_layers,
+        boundaries,
     }
 }
 
@@ -158,7 +216,7 @@ fn parse_higher(expect: &[String]) -> Vec<HigherKindedStructure> {
 
 /// glob パターン（`**` 含む）をパスにマッチさせる。簡易版:
 /// `**` は任意の0以上のディレクトリ、`*` は1コンポーネント内の任意文字列。
-fn glob_match(pattern: &str, path: &str) -> bool {
+pub fn glob_match(pattern: &str, path: &str) -> bool {
     let pat: Vec<&str> = pattern.split('/').collect();
     let pth: Vec<&str> = path.split('/').collect();
     glob_match_i(&pat, 0, &pth, 0)

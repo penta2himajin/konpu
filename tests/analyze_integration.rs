@@ -229,3 +229,18 @@ fn layer_expectation_mismatch_for_higher_kinded() {
         .find(|m| m.reason.contains("higher"));
     assert!(higher_mismatch.is_some(), "expected a higher-kinded mismatch, got: {:?}", result.expectation_mismatches);
 }
+
+#[test]
+fn boundary_violation_when_to_layer_imports_from_keyword() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    let cfg = template::parse(
+        "[boundaries.ddd]\nfrom = \"src/domain/**\"\nto = \"src/analyze/fixtures/infra_thing.rs\"\npreserve = [\"monoid\"]\n",
+    );
+    let result = analyze_full(&fixture("infra_thing.rs"), &cfg);
+    assert!(
+        result.boundary_violations.iter().any(|v| v.imported_path.replace("::", "/").contains("src/domain")),
+        "expected a boundary violation containing `src/domain`, got: {:?}",
+        result.boundary_violations
+    );
+}
