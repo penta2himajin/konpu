@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
+use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure, Law};
 
 #[derive(Debug, Clone)]
 pub struct AnalyzedDeclaration {
@@ -265,6 +265,103 @@ fn recurse_collect(
     for child in node.children(&mut cur) {
         recurse_collect(child, source, path, out, seen);
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LawTestInfo {
+    pub laws: Vec<Law>,
+    pub enclosing_type: Option<String>,
+    pub path: PathBuf,
+    pub line: usize,
+}
+
+pub fn law_from_name(name: &str) -> Option<Law> {
+    match name.trim() {
+        "associativity" => Some(Law::Associativity),
+        "left_identity" => Some(Law::LeftIdentity),
+        "right_identity" => Some(Law::RightIdentity),
+        "inverse_left" => Some(Law::InverseLeft),
+        "inverse_right" => Some(Law::InverseRight),
+        "functor_identity" => Some(Law::FunctorIdentity),
+        "functor_composition" => Some(Law::FunctorComposition),
+        "applicative_identity" => Some(Law::ApplicativeIdentity),
+        "applicative_composition" => Some(Law::ApplicativeComposition),
+        "monad_left_identity" => Some(Law::MonadLeftIdentity),
+        "monad_right_identity" => Some(Law::MonadRightIdentity),
+        "monad_associativity" => Some(Law::MonadAssociativity),
+        _ => None,
+    }
+}
+
+fn enclosing_impl_type(node: Node, source: &str) -> Option<String> {
+    let mut cur = node;
+    loop {
+        cur = cur.parent()?;
+        if cur.kind() == "impl_item" {
+            return impl_type_name(cur, source);
+        }
+    }
+}
+
+pub fn extract_law_tests(root: Node, source: &str, path: &Path) -> Vec<LawTestInfo> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    recurse_collect_laws(root, source, path, &mut out, &mut seen);
+    out
+}
+
+fn recurse_collect_laws(
+    node: Node,
+    source: &str,
+    path: &Path,
+    out: &mut Vec<LawTestInfo>,
+    seen: &mut std::collections::HashSet<(usize, String)>,
+) {
+    if matches!(node.kind(), "attribute" | "attribute_item") {
+        let txt = text_of(node, source);
+        if txt.contains("konpu::law") {
+            let line = node.start_position().row;
+            let key = (line, txt.clone());
+            if seen.insert(key) {
+                if let Some(info) = parse_law_attr(node, source, path) {
+                    out.push(info);
+                }
+            }
+        }
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        recurse_collect_laws(child, source, path, out, seen);
+    }
+}
+
+fn parse_law_attr(attr: Node, source: &str, path: &Path) -> Option<LawTestInfo> {
+    let txt = text_of(attr, source);
+    let inside = txt.find('(').map(|i| {
+        let close = txt.rfind(')').unwrap_or(txt.len());
+        &txt[i + 1..close]
+    })?;
+    let inside = inside.trim();
+    let mut laws = Vec::new();
+    for part in split_args(inside) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(law) = law_from_name(part) {
+            laws.push(law);
+        }
+    }
+    if laws.is_empty() {
+        return None;
+    }
+    let enclosing_type = enclosing_impl_type(attr, source);
+    Some(LawTestInfo {
+        laws,
+        enclosing_type,
+        path: path.to_path_buf(),
+        line: attr.start_position().row + 1,
+    })
 }
 
 pub fn extract_impls(root: Node, source: &str) -> Vec<ImplInfo> {

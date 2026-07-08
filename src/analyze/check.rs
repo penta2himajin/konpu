@@ -1,8 +1,12 @@
-use crate::domain::konpu::{
-    AlgebraicDeclaration, Diagnostic, DiagnosticRule, OperationName, Severity,
-};
+use std::path::PathBuf;
 
-use super::extract::{AnalyzedDeclaration, ImplInfo, SelfKind};
+use crate::domain::konpu::{
+    AlgebraicDeclaration, AlgebraicStructure, Diagnostic, DiagnosticRule, Law, OperationName,
+    Severity,
+};
+use crate::domain::fixtures::all_law_requirements;
+
+use super::extract::{AnalyzedDeclaration, ImplInfo, LawTestInfo, SelfKind};
 
 pub fn check_declaration(
     decl: &AnalyzedDeclaration,
@@ -150,3 +154,71 @@ fn op_returns_self(decl: &AnalyzedDeclaration, op: &super::extract::MethodInfo) 
     }
     true
 }
+
+fn required_laws_for(structure: &AlgebraicStructure) -> Vec<Law> {
+    let mut out: Vec<Law> = all_law_requirements()
+        .iter()
+        .filter(|r| r.structure.rank() <= structure.rank())
+        .map(|r| r.requiredLaw.clone())
+        .collect();
+    out.sort_by_key(law_index);
+    out.dedup();
+    out
+}
+
+fn law_index(l: &Law) -> usize {
+    use Law::*;
+    match l {
+        Associativity => 0,
+        LeftIdentity => 1,
+        RightIdentity => 2,
+        InverseLeft => 3,
+        InverseRight => 4,
+        FunctorIdentity => 5,
+        FunctorComposition => 6,
+        ApplicativeIdentity => 7,
+        ApplicativeComposition => 8,
+        MonadLeftIdentity => 9,
+        MonadRightIdentity => 10,
+        MonadAssociativity => 11,
+    }
+}
+
+pub fn check_law_tests(
+    decls: &[AnalyzedDeclaration],
+    law_tests: &[LawTestInfo],
+) -> Vec<(PathBuf, usize, Diagnostic)> {
+    let mut out = Vec::new();
+    for decl in decls {
+        if decl.target_structure.rank() < 1 {
+            continue;
+        }
+        let required = required_laws_for(&decl.target_structure);
+        for law in &required {
+            let covered = law_tests.iter().any(|t| {
+                t.laws.iter().any(|l| l == law)
+                    && (t.enclosing_type.is_none() || t.enclosing_type.as_deref() == Some(&decl.type_name))
+            });
+            if !covered {
+                let declaration = AlgebraicDeclaration {
+                    targetStructure: decl.target_structure.clone(),
+                    higherKinded: decl.higher_kinded.clone(),
+                    operationName: OperationName,
+                    identityName: None,
+                    inverseName: None,
+                };
+                out.push((
+                    decl.path.clone(),
+                    decl.line,
+                    Diagnostic {
+                        severity: Severity::Warning,
+                        declaration,
+                        rule: DiagnosticRule::MissingLawTest,
+                    },
+                ));
+            }
+        }
+    }
+    out
+}
+

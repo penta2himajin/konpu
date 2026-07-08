@@ -64,3 +64,23 @@ fn functor_sig_violation() {
     let diags = analyze_path(&fixture("functor_sig_violation.rs"));
     assert_eq!(count(&diags, Severity::Error, DiagnosticRule::MapSignatureViolation), 1);
 }
+
+#[test]
+fn law_test_present_no_missing_warning() {
+    let diags = analyze_path(&fixture("law_test_present.rs"));
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::MissingLawTest), 0);
+}
+
+#[test]
+fn law_test_missing_warns() {
+    let diags = analyze_path(&fixture("law_test_missing.rs"));
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::MissingLawTest), 1);
+}
+
+#[test]
+fn monoid_partial_law_tests_warns() {
+    let diags = analyze_path(&fixture("monoid_partial_law_tests.rs"));
+    // Monoid rank 2 includes Semigroup{Associativity} + Monoid{LeftIdentity, RightIdentity} = 3 laws.
+    // Only left_identity is present → 2 missing.
+    assert_eq!(count(&diags, Severity::Warning, DiagnosticRule::MissingLawTest), 2);
+}
