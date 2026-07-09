@@ -1,6 +1,6 @@
 # 第2層b：コールグラフトポロジ複雑度 — 設計方針
 
-> ステータス：設計方針のみ確定。実装未着手（Konpu本体のPhase 0完了後に着手予定。事実フォーマットの仕様策定のみ先行させる）
+> ステータス：RTA ベースの過大近似（CHA→RTA）を実装済み。rust-analyzer/SCIP 経由の事実抽出 + Tarjan による循環/ハブ検出を `konpu callgraph`（`call-graph` feature）で提供。Konpu 本体（Phase 2-A）への接続は未実装。
 > 関連：`roadmap.md` セクション1（層モデル）、セクション8（保留事項）
 
 ## 1. これは何を測るか
@@ -65,9 +65,9 @@ Rustは方針的にこのアプローチに適している。
 
 Konpu本体（第3層、Phase 0〜）を優先する。この層については以下の順で進める。
 
-1. 事実フォーマットの仕様策定（Rust/Kotlin/TSのディスパッチ規則を横断できる表現かを机上検証する。実装は伴わない）
-2. RustにおけるStableMIRまたはrust-analyzer HIR経由の事実抽出器のプロトタイプ
-3. RTAベースの解釈エンジン（CHAから開始し、RTAへ拡張）
-4. Konpuの層間制約機能（Phase 2-A）との接続
+1. 事実フォーマットの仕様策定（`konpu-cg::facts` として実装。Rust に必要な型・trait 実装・呼び出しサイト・インスタンス化型を持つ言語中立モデル） — **完了**
+2. rust-analyzer/SCIP 経由の事実抽出器（`konpu-cg::scip_extract`。StableMIR ではなく SCIP を採用） — **完了**
+3. RTAベースの解釈エンジン（`konpu-cg::graph`。CHA から開始し RTA へ拡張。循環/ハブのクエリ付き） — **完了**
+4. Konpuの層間制約機能（Phase 2-A）との接続 — **未着手**（preserve のコールグラフ判定ルールが未策定）
 
-Konpu本体のPhase 0が未着手の現状（2026年7月時点）を踏まえ、1のみを先行させ、2以降はKonpu Phase 0-A〜Cの完成後に着手する。
+現状（2026年7月）、1〜3 が完了し `konpu callgraph` として利用可能。4 は判定ルール策定後に着手する。
