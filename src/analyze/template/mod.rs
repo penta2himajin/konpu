@@ -118,6 +118,16 @@ pub struct Config {
     /// 解析対象から除外する glob パターン（root 相対）。例: `["tests/**", "**/fixtures/**"]`。
     #[serde(default)]
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub callgraph: Callgraph,
+}
+
+/// `[callgraph]` セクション。`konpu callgraph` の閾値調整。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Callgraph {
+    /// ハブ（fan-out/fan-in）とみなす次数の下限。未設定なら CLI 既定（8）。
+    #[serde(default)]
+    pub hub_threshold: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -152,6 +162,8 @@ pub struct ResolvedConfig {
     pub boundaries: Vec<ResolvedBoundary>,
     /// 解析対象から除外する glob（root 相対）。
     pub exclude: Vec<String>,
+    /// `konpu callgraph` のハブ次数下限（未設定なら CLI 既定）。
+    pub callgraph_hub_threshold: Option<usize>,
 }
 
 impl ResolvedConfig {
@@ -161,6 +173,7 @@ impl ResolvedConfig {
             layers: Vec::new(),
             boundaries: Vec::new(),
             exclude: Vec::new(),
+            callgraph_hub_threshold: None,
         }
     }
 
@@ -251,6 +264,7 @@ pub fn parse(text: &str) -> ResolvedConfig {
         layers: preset_layers,
         boundaries,
         exclude: config.exclude,
+        callgraph_hub_threshold: config.callgraph.hub_threshold,
     }
 }
 
@@ -474,6 +488,14 @@ mod tests {
     fn glob_match_single_star() {
         assert!(glob_match("src/*.rs", "src/foo.rs"));
         assert!(!glob_match("src/*.rs", "src/foo/bar.rs"));
+    }
+
+    #[test]
+    fn callgraph_hub_threshold_parsed() {
+        let cfg = parse("[callgraph]\nhub_threshold = 5\n");
+        assert_eq!(cfg.callgraph_hub_threshold, Some(5));
+        let empty = parse("");
+        assert_eq!(empty.callgraph_hub_threshold, None);
     }
 
     #[test]

@@ -66,9 +66,10 @@ enum Commands {
         /// Dispatch resolution precision: rta (default) or cha
         #[arg(long, default_value = "rta")]
         precision: String,
-        /// Report functions whose fan-in or fan-out is at least this (default 8)
-        #[arg(long, default_value_t = 8)]
-        hub_threshold: usize,
+        /// Report functions whose fan-in or fan-out is at least this. Overrides
+        /// [callgraph] hub_threshold in konpu.toml; both fall back to 8.
+        #[arg(long)]
+        hub_threshold: Option<usize>,
     },
 }
 
@@ -330,6 +331,9 @@ fn main() {
                 facts.instantiated =
                     konpu::analyze::call_graph::constructed_types(std::path::Path::new(&path));
             }
+            // ハブ閾値: CLI flag > konpu.toml [callgraph].hub_threshold > 既定 8。
+            let cfg = konpu::analyze::template::load(&std::path::Path::new(&path).join("konpu.toml"));
+            let hub_threshold = hub_threshold.or(cfg.callgraph_hub_threshold).unwrap_or(8);
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();
             let cycles = g.cycles();

@@ -9,3 +9,6 @@ exclude = [
     "**/tests/**",
     "tests/**",
 ]
+
+# [callgraph] hub_threshold defaults to 8; lower it (e.g. = 5) to flag more
+# functions as fan-out decomposition candidates. konpu keeps the default.

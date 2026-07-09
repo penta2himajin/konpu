@@ -320,6 +320,7 @@ mod tests {
                 preserve_checks: PreserveChecks { aggregate: true, construct: true },
             }],
             exclude: Vec::new(),
+            callgraph_hub_threshold: None,
         }
     }
 
