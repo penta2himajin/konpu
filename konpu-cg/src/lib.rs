@@ -1,8 +1,15 @@
-//! `konpu-cg` — コールグラフ provider のスタブ。
+//! `konpu-cg` — コールグラフ provider とその構築エンジン。
 //!
-//! Phase 0: 空のコールグラフを返すダミー実装のみ提供。
-//! Phase 1 (別セッション) で rust-analyzer との JSON-RPC 通信を実装し、
-//! ここに `RustAnalyzerCallGraphProvider` を追加する。
+//! 構成 (docs/layer2-call-graph-design.md):
+//! - `facts`: 抽出器が生成する言語中立な事実モデル。
+//! - `graph`: CHA/RTA によるディスパッチ解釈と循環/ハブのクエリ。
+//! - `CallGraphProvider`: konpu 本体が使う位置ベースの provider トレイト。
+
+pub mod facts;
+pub mod graph;
+
+pub use facts::{CallSite, CallTargetKind, FuncDef, FuncId, Facts, ImplEntry, TraitMethod};
+pub use graph::{CallGraph, Precision};
 
 use std::path::{Path, PathBuf};
 
