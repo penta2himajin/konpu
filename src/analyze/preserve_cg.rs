@@ -12,7 +12,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use super::call_graph::{is_aggregation_shape, CallGraph, Facts, FnSig, FuncId, Precision};
+use super::call_graph::{
+    is_aggregation_shape, param_is_type, CallGraph, Facts, FnSig, FuncId, Precision,
+};
 use super::extract::{AnalyzedDeclaration, LawTestInfo};
 use super::template::{PreserveSeverity, ResolvedConfig};
 use crate::domain::konpu::Severity;
@@ -54,8 +56,8 @@ pub fn check_preserve(
         if b.preserve.is_empty() || b.preserve_severity == PreserveSeverity::Off {
             continue;
         }
-        if !b.preserve_checks.aggregate {
-            continue; // 検出器 C は Stage 4。
+        if !b.preserve_checks.aggregate && !b.preserve_checks.construct {
+            continue;
         }
         let from_decls: Vec<&AnalyzedDeclaration> = decls
             .iter()
@@ -82,37 +84,96 @@ pub fn check_preserve(
             let Some(severity) = effective_severity(b.preserve_severity, has_law) else {
                 continue;
             };
-            for sig in fn_sigs {
-                if !is_aggregation_shape(sig, ty) {
-                    continue;
-                }
+            // to 層かつ operation に未到達か、を判定する共通クロージャ。
+            let to_layer_bypasses = |sig: &FnSig| -> bool {
                 let Some(fid) = resolve_funcid(sig, facts) else {
-                    continue;
+                    return false;
                 };
-                // to 層判定は結合後の SCIP パス（クリーンな相対パス）で行う。
-                if !glob_match_str(&b.to_pattern, &facts.funcs[fid].path.to_string_lossy()) {
-                    continue;
+                glob_match_str(&b.to_pattern, &facts.funcs[fid].path.to_string_lossy())
+                    && !reaches(&graph, fid, &targets)
+            };
+            // 検出器 B（集約保存）。C と重複しないよう対象関数を記録する。
+            let mut flagged: HashSet<(PathBuf, usize)> = HashSet::new();
+            if b.preserve_checks.aggregate {
+                for sig in fn_sigs {
+                    if !is_aggregation_shape(sig, ty) || !to_layer_bypasses(sig) {
+                        continue;
+                    }
+                    flagged.insert((sig.path.clone(), sig.line));
+                    out.push(PreserveFinding {
+                        boundary: b.name.clone(),
+                        type_name: ty.clone(),
+                        function: sig.name.clone(),
+                        path: sig.path.clone(),
+                        line: sig.line,
+                        kind: PreserveKind::Aggregate,
+                        severity: severity.clone(),
+                        reason: format!(
+                            "aggregates `{ty}` but never reaches its `{op}` operation across boundary `{}` (possible hand-rolled merge)",
+                            b.name
+                        ),
+                    });
                 }
-                if reaches(&graph, fid, &targets) {
-                    continue; // operation を経由している → OK。
+            }
+            // 検出器 C（手書きマージ構築）。B が拾った関数は除く。
+            if b.preserve_checks.construct {
+                for sig in fn_sigs {
+                    if flagged.contains(&(sig.path.clone(), sig.line)) {
+                        continue;
+                    }
+                    let Some(cline) = hand_rolled_merge(sig, ty) else {
+                        continue;
+                    };
+                    if !to_layer_bypasses(sig) {
+                        continue;
+                    }
+                    out.push(PreserveFinding {
+                        boundary: b.name.clone(),
+                        type_name: ty.clone(),
+                        function: sig.name.clone(),
+                        path: sig.path.clone(),
+                        line: cline,
+                        kind: PreserveKind::Construct,
+                        severity: severity.clone(),
+                        reason: format!(
+                            "constructs `{ty}` by hand-merging >=2 `{ty}` values without reaching its `{op}` operation across boundary `{}`",
+                            b.name
+                        ),
+                    });
                 }
-                out.push(PreserveFinding {
-                    boundary: b.name.clone(),
-                    type_name: ty.clone(),
-                    function: sig.name.clone(),
-                    path: sig.path.clone(),
-                    line: sig.line,
-                    kind: PreserveKind::Aggregate,
-                    severity: severity.clone(),
-                    reason: format!(
-                        "aggregates `{ty}` but never reaches its `{op}` operation across boundary `{}` (possible hand-rolled merge)",
-                        b.name
-                    ),
-                });
             }
         }
     }
     out
+}
+
+/// 検出器 C: `sig` が「≥2 個の `ty` 型値を生構築で併合する」手書きマージを含むか。
+/// 含めばその構築の行を返す。to 層で `ty` を扱うがシグネチャにマージが現れない
+/// （例 `fn h(a: T, b: T) -> Response`）ケースを、構築サイトのデータフローで拾う。
+// ponytail: T 型変数は「T 型の引数 + self」のみ追跡する近似。ループ変数や
+// `let` で束ねた中間 T（アキュムレータ等）は追わない — その形は検出器 B が拾う。
+// 改善経路: 関数内データフロー。
+fn hand_rolled_merge(sig: &FnSig, ty: &str) -> Option<usize> {
+    let self_ty = sig.self_type.as_deref();
+    let mut t_vars: HashSet<&str> = HashSet::new();
+    if self_ty == Some(ty) {
+        t_vars.insert("self");
+    }
+    for (name, pty) in &sig.params_named {
+        if param_is_type(pty, ty, self_ty) {
+            t_vars.insert(name.as_str());
+        }
+    }
+    for c in &sig.constructions {
+        if c.type_name != ty {
+            continue;
+        }
+        let distinct_t = c.refs.iter().filter(|r| t_vars.contains(r.as_str())).count();
+        if distinct_t >= 2 {
+            return Some(c.line);
+        }
+    }
+    None
 }
 
 /// 設定深刻度 + law_test の有無から実効深刻度を決める。law_test 無しは一段降格。
@@ -240,7 +301,9 @@ mod tests {
             name: name.to_string(),
             self_type: self_ty.map(str::to_string),
             params: params.iter().map(|s| s.to_string()).collect(),
+            params_named: Vec::new(),
             ret: Some(ret.to_string()),
+            constructions: Vec::new(),
         }
     }
 
@@ -313,6 +376,50 @@ mod tests {
         let decls = vec![decl("Money", "src/domain/money.rs", "combine")];
         let sigs = vec![sig("hand_merge", "src/infra/repo.rs", 20, None, &["Money", "Money"], "Money")];
         let out = check_preserve(&decls, &law_for("Money"), &config(PreserveSeverity::Off), &facts, &sigs, std::path::Path::new(""));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn detector_c_flags_hidden_hand_rolled_merge() {
+        use crate::analyze::call_graph::MergeConstruction;
+        // `convert(a: Money, b: Money) -> Response` — signature hides the merge
+        // (returns Response), so B misses it; C catches the Money{..} that
+        // combines a and b without reaching combine.
+        let mut f = Facts::default();
+        f.add_func("impl#[Money]combine", "src/domain/money.rs", 5);
+        f.add_func("convert", "src/infra/repo.rs", 40); // calls nothing
+        let decls = vec![decl("Money", "src/domain/money.rs", "combine")];
+        let mut s = sig("convert", "src/infra/repo.rs", 40, None, &["Money", "Money"], "Response");
+        s.params_named = vec![("a".into(), "Money".into()), ("b".into(), "Money".into())];
+        s.constructions = vec![MergeConstruction {
+            type_name: "Money".into(),
+            line: 42,
+            refs: vec!["a".into(), "b".into()],
+        }];
+        let out = check_preserve(&decls, &law_for("Money"), &config(PreserveSeverity::Warn), &f, &[s], Path::new(""));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, PreserveKind::Construct);
+        assert_eq!(out[0].line, 42);
+    }
+
+    #[test]
+    fn detector_c_ignores_single_source_construction() {
+        use crate::analyze::call_graph::MergeConstruction;
+        // constructs Money from ONE Money (a transform) + a primitive — not a merge.
+        let mut f = Facts::default();
+        f.add_func("impl#[Money]combine", "src/domain/money.rs", 5);
+        f.add_func("scale", "src/infra/repo.rs", 40);
+        let decls = vec![decl("Money", "src/domain/money.rs", "combine")];
+        let mut s = sig("scale", "src/infra/repo.rs", 40, None, &["Money", "u64"], "Money");
+        s.params_named = vec![("a".into(), "Money".into()), ("k".into(), "u64".into())];
+        s.constructions = vec![MergeConstruction {
+            type_name: "Money".into(),
+            line: 42,
+            refs: vec!["a".into(), "k".into()], // only one Money source
+        }];
+        let out = check_preserve(&decls, &law_for("Money"), &config(PreserveSeverity::Warn), &f, &[s], Path::new(""));
+        // aggregation shape? a:Money,k:u64 -> Money: only 1 Money input, not aggregate.
+        // C? only 1 distinct Money ref. So nothing.
         assert!(out.is_empty());
     }
 

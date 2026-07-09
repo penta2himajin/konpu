@@ -133,6 +133,16 @@ fn walk_constructions(node: Node, source: &str, out: &mut HashSet<String>) {
 
 use std::path::PathBuf;
 
+/// 関数本体内の生構築 1 件（検出器 C: 手書きマージ判定用）。
+#[derive(Debug, Clone)]
+pub struct MergeConstruction {
+    /// 構築される型名（`Money{..}` / `Money(..)` の Money）。
+    pub type_name: String,
+    pub line: usize,
+    /// フィールド/引数式で参照している基底識別子（重複なし。`a.x` → "a"）。
+    pub refs: Vec<String>,
+}
+
 /// 1 関数のシグネチャ。SCIP の FuncId と `path`+`name`(+行) で結合する。
 #[derive(Debug, Clone)]
 pub struct FnSig {
@@ -143,7 +153,16 @@ pub struct FnSig {
     pub self_type: Option<String>,
     /// 明示引数の型文字列（self を除く。生ソースのまま: "Money", "&[Money]" 等）。
     pub params: Vec<String>,
+    /// 明示引数の (識別子, 型文字列)。検出器 C の T 型変数特定用。
+    pub params_named: Vec<(String, String)>,
     pub ret: Option<String>,
+    /// 本体内の生構築（検出器 C 用）。
+    pub constructions: Vec<MergeConstruction>,
+}
+
+/// 型文字列 `param` が（参照を剥がして）ちょうど型 `ty`（`Self` 解決込み）か。公開版。
+pub fn param_is_type(param: &str, ty: &str, self_ty: Option<&str>) -> bool {
+    is_exactly(param, ty, self_ty)
 }
 
 /// path 配下の全関数シグネチャを収集する。
@@ -211,6 +230,7 @@ fn parse_fn_sig(node: Node, source: &str, path: &Path, impl_ty: Option<&str>) ->
     let name = text_of(node.child_by_field_name("name")?, source)?;
     let mut has_self = false;
     let mut params = Vec::new();
+    let mut params_named = Vec::new();
     if let Some(pn) = node.child_by_field_name("parameters") {
         let mut cursor = pn.walk();
         for param in pn.children(&mut cursor) {
@@ -219,7 +239,13 @@ fn parse_fn_sig(node: Node, source: &str, path: &Path, impl_ty: Option<&str>) ->
                 "parameter" => {
                     if let Some(t) = param.child_by_field_name("type") {
                         if let Some(txt) = text_of(t, source) {
-                            params.push(txt.trim().to_string());
+                            let ty = txt.trim().to_string();
+                            if let Some(pat) = param.child_by_field_name("pattern") {
+                                if let Some(id) = text_of(pat, source) {
+                                    params_named.push((id, ty.clone()));
+                                }
+                            }
+                            params.push(ty);
                         }
                     }
                 }
@@ -235,14 +261,80 @@ fn parse_fn_sig(node: Node, source: &str, path: &Path, impl_ty: Option<&str>) ->
             .trim()
             .to_string()
     });
+    let mut constructions = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        collect_merge_constructions(body, source, &mut constructions);
+    }
     Some(FnSig {
         path: path.to_path_buf(),
         line: node.start_position().row + 1,
         name,
         self_type: if has_self { impl_ty.map(str::to_string) } else { None },
         params,
+        params_named,
         ret,
+        constructions,
     })
+}
+
+/// 関数本体内の生構築（struct リテラル / タプル構築）を収集する。
+fn collect_merge_constructions(node: Node, source: &str, out: &mut Vec<MergeConstruction>) {
+    match node.kind() {
+        "struct_expression" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                if let Some(ty) = first_type_ident(name, source) {
+                    let mut refs = Vec::new();
+                    if let Some(body) = node.child_by_field_name("body") {
+                        collect_idents(body, source, &mut refs);
+                    }
+                    out.push(MergeConstruction {
+                        type_name: ty,
+                        line: node.start_position().row + 1,
+                        refs,
+                    });
+                }
+            }
+        }
+        "call_expression" => {
+            if let Some(f) = node.child_by_field_name("function") {
+                if let Some(ty) = callee_type(f, source) {
+                    let mut refs = Vec::new();
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        collect_idents(args, source, &mut refs);
+                    }
+                    out.push(MergeConstruction {
+                        type_name: ty,
+                        line: node.start_position().row + 1,
+                        refs,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_merge_constructions(child, source, out);
+    }
+}
+
+/// 式木内の基底識別子（`identifier` と `self`）を重複なく集める。`a.x` → "a"。
+fn collect_idents(node: Node, source: &str, out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => {
+            if let Some(t) = text_of(node, source) {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+        "self" if !out.iter().any(|s| s == "self") => out.push("self".to_string()),
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_idents(child, source, out);
+    }
 }
 
 fn strip_refs(s: &str) -> &str {
