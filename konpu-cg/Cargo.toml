@@ -2,9 +2,16 @@
 name = "konpu-cg"
 version = "0.1.0"
 edition = "2024"
-description = "Call graph provider for konpu — stub implementation"
+description = "Call graph provider for konpu — CHA/RTA engine + SCIP extractor"
 
 [lib]
 path = "src/lib.rs"
 
+[features]
+# rust-analyzer SCIP index -> Facts extractor. Pulls the protobuf dep only
+# when enabled; the pure CHA/RTA engine has no dependencies.
+scip = ["dep:scip", "dep:protobuf"]
+
 [dependencies]
+scip = { version = "0.5", optional = true }
+protobuf = { version = "3", optional = true }
