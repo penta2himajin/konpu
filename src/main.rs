@@ -333,7 +333,6 @@ fn main() {
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();
             let cycles = g.cycles();
-            let hubs = g.hubs(hub_threshold);
             println!("== konpu callgraph ({precision}) ==");
             println!("functions: {}", facts.funcs.len());
             println!("call edges: {edges}");
@@ -342,16 +341,35 @@ fn main() {
                 let names: Vec<&str> = scc.iter().map(|&f| facts.funcs[f].name.as_str()).collect();
                 println!("  cycle ({}): {}", scc.len(), names.join(" -> "));
             }
-            println!("hubs (fan-in/out >= {hub_threshold}): {}", hubs.len());
-            for &f in &hubs {
+            let print_hub = |f: konpu::analyze::call_graph::FuncId| {
                 println!(
-                    "  {} (in={}, out={}) {}:{}",
+                    "  {} (out={}, in={}) {}:{}",
                     facts.funcs[f].name,
-                    g.in_degree(f),
                     g.out_degree(f),
+                    g.in_degree(f),
                     facts.funcs[f].path.display(),
                     facts.funcs[f].line
                 );
+            };
+            // fan-out: 神関数の匂い（多くを呼ぶ）→ 分解候補。
+            let mut fan_out = g.fan_out_hubs(hub_threshold);
+            fan_out.sort_by_key(|&f| std::cmp::Reverse(g.out_degree(f)));
+            println!(
+                "fan-out hubs (calls >= {hub_threshold} — decomposition candidates): {}",
+                fan_out.len()
+            );
+            for f in fan_out {
+                print_hub(f);
+            }
+            // fan-in: 広く使われるヘルパー（多くから呼ばれる）→ 大抵健全、変更の集中点。
+            let mut fan_in = g.fan_in_hubs(hub_threshold);
+            fan_in.sort_by_key(|&f| std::cmp::Reverse(g.in_degree(f)));
+            println!(
+                "fan-in hubs (called >= {hub_threshold} — shared helpers / change chokepoints): {}",
+                fan_in.len()
+            );
+            for f in fan_in {
+                print_hub(f);
             }
         }
     }

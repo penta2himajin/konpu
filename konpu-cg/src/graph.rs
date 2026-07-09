@@ -69,10 +69,19 @@ impl CallGraph {
         self.edges.iter().filter(|s| s.contains(&f)).count()
     }
 
-    /// fan-in か fan-out が閾値以上のハブ関数を返す。
-    pub fn hubs(&self, min_degree: usize) -> Vec<FuncId> {
+    /// fan-out（呼び出し先数）が閾値以上の関数。多くを呼ぶ = 神関数/オーケストレータの
+    /// 匂いで、分解候補になりやすい（actionable）。
+    pub fn fan_out_hubs(&self, min_degree: usize) -> Vec<FuncId> {
         (0..self.edges.len())
-            .filter(|&f| self.in_degree(f) >= min_degree || self.out_degree(f) >= min_degree)
+            .filter(|&f| self.out_degree(f) >= min_degree)
+            .collect()
+    }
+
+    /// fan-in（呼び出し元数）が閾値以上の関数。多くから呼ばれる = 広く使われるヘルパー。
+    /// 大抵は健全な再利用だが、変更時の影響が集中するチョークポイントでもある。
+    pub fn fan_in_hubs(&self, min_degree: usize) -> Vec<FuncId> {
+        (0..self.edges.len())
+            .filter(|&f| self.in_degree(f) >= min_degree)
             .collect()
     }
 
@@ -263,17 +272,26 @@ mod tests {
     }
 
     #[test]
-    fn hubs_by_degree() {
-        // one callee with high fan-in.
+    fn fan_in_and_fan_out_hubs_are_distinct() {
+        // `hub` is called by 4 callers (fan-in=4, fan-out=0).
+        // `god` calls 3 callees (fan-out=3, fan-in=0).
         let mut f = Facts::default();
         let hub = f.add_func("hub", "src/h.rs", 1);
+        let god = f.add_func("god", "src/g.rs", 1);
         let callers: Vec<_> = (0..4).map(|i| f.add_func(format!("c{i}"), "src/c.rs", i)).collect();
         for &c in &callers {
             f.calls.push(CallSite { caller: c, target: CallTargetKind::Static(hub) });
         }
+        let callees: Vec<_> = (0..3).map(|i| f.add_func(format!("d{i}"), "src/d.rs", i)).collect();
+        for &d in &callees {
+            f.calls.push(CallSite { caller: god, target: CallTargetKind::Static(d) });
+        }
         let g = CallGraph::build(&f, Precision::Cha);
-        assert_eq!(g.in_degree(hub), 4);
-        assert!(g.hubs(4).contains(&hub));
-        assert!(!g.hubs(5).contains(&hub));
+        // fan-in hub: hub, not god
+        assert!(g.fan_in_hubs(4).contains(&hub));
+        assert!(!g.fan_in_hubs(4).contains(&god));
+        // fan-out hub: god, not hub
+        assert!(g.fan_out_hubs(3).contains(&god));
+        assert!(!g.fan_out_hubs(3).contains(&hub));
     }
 }
