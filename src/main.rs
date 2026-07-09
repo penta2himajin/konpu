@@ -333,13 +333,30 @@ fn main() {
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();
             let cycles = g.cycles();
+            // 相互循環（size>=2 = 別々の関数が輪になった真の循環依存）と
+            // 自己再帰（size==1 = 自分を呼ぶだけの通常の再帰、良性）を分ける。
+            let (mutual, self_rec): (Vec<_>, Vec<_>) =
+                cycles.into_iter().partition(|scc| scc.len() > 1);
             println!("== konpu callgraph ({precision}) ==");
             println!("functions: {}", facts.funcs.len());
             println!("call edges: {edges}");
-            println!("cycles: {}", cycles.len());
-            for scc in &cycles {
+            println!(
+                "mutual cycles (circular dependencies): {}",
+                mutual.len()
+            );
+            for scc in &mutual {
                 let names: Vec<&str> = scc.iter().map(|&f| facts.funcs[f].name.as_str()).collect();
                 println!("  cycle ({}): {}", scc.len(), names.join(" -> "));
+            }
+            println!("self-recursion (benign): {}", self_rec.len());
+            for scc in &self_rec {
+                let f = scc[0];
+                println!(
+                    "  {} {}:{}",
+                    facts.funcs[f].name,
+                    facts.funcs[f].path.display(),
+                    facts.funcs[f].line
+                );
             }
             let print_hub = |f: konpu::analyze::call_graph::FuncId| {
                 println!(
