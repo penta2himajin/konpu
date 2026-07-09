@@ -319,6 +319,7 @@ mod tests {
                 preserve_severity: sev,
                 preserve_checks: PreserveChecks { aggregate: true, construct: true },
             }],
+            exclude: Vec::new(),
         }
     }
 

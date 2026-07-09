@@ -115,6 +115,9 @@ pub struct Config {
     pub layers: toml::Table,
     #[serde(default, rename = "boundaries")]
     pub boundaries: toml::Table,
+    /// 解析対象から除外する glob パターン（root 相対）。例: `["tests/**", "**/fixtures/**"]`。
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -147,6 +150,8 @@ pub struct ResolvedConfig {
     pub defaults_max: Option<i64>,
     pub layers: Vec<ResolvedLayer>,
     pub boundaries: Vec<ResolvedBoundary>,
+    /// 解析対象から除外する glob（root 相対）。
+    pub exclude: Vec<String>,
 }
 
 impl ResolvedConfig {
@@ -155,7 +160,19 @@ impl ResolvedConfig {
             defaults_max: None,
             layers: Vec::new(),
             boundaries: Vec::new(),
+            exclude: Vec::new(),
         }
+    }
+
+    /// ファイル（root 相対に正規化）が exclude パターンのいずれかに一致するか。
+    pub fn is_excluded(&self, file: &Path, root: &Path) -> bool {
+        if self.exclude.is_empty() {
+            return false;
+        }
+        let rel = file.strip_prefix(root).unwrap_or(file);
+        let rel = rel.to_string_lossy();
+        let rel = rel.trim_start_matches("./");
+        self.exclude.iter().any(|p| glob_match(p, rel))
     }
 }
 
@@ -233,6 +250,7 @@ pub fn parse(text: &str) -> ResolvedConfig {
         defaults_max: config.defaults.max_propagation,
         layers: preset_layers,
         boundaries,
+        exclude: config.exclude,
     }
 }
 
@@ -456,6 +474,16 @@ mod tests {
     fn glob_match_single_star() {
         assert!(glob_match("src/*.rs", "src/foo.rs"));
         assert!(!glob_match("src/*.rs", "src/foo/bar.rs"));
+    }
+
+    #[test]
+    fn exclude_globs_parsed_and_matched() {
+        let cfg = parse("exclude = [\"tests/**\", \"**/fixtures/**\"]\n");
+        assert_eq!(cfg.exclude.len(), 2);
+        let root = Path::new("/proj");
+        assert!(cfg.is_excluded(Path::new("/proj/tests/it.rs"), root));
+        assert!(cfg.is_excluded(Path::new("/proj/src/analyze/fixtures/x.rs"), root));
+        assert!(!cfg.is_excluded(Path::new("/proj/src/analyze/mod.rs"), root));
     }
 
     #[test]

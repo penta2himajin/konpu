@@ -72,7 +72,10 @@ pub fn analyze_full_with_cg(
 
 /// 実際の解析本体。provider 非依存の従来ロジック。
 fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> AnalysisResult {
-    let files = parser::collect_rust_files(path);
+    let files: Vec<PathBuf> = parser::collect_rust_files(path)
+        .into_iter()
+        .filter(|f| !config.is_excluded(f, path))
+        .collect();
     let mut all_decls = Vec::new();
     let mut all_impls = Vec::new();
     let mut all_law_tests = Vec::new();

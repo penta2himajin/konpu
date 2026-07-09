@@ -1,0 +1,11 @@
+# konpu's own configuration — dogfooding.
+#
+# konpu's production code is compiler/linter infrastructure, not an algebraic
+# domain model, so it carries no algebraic-structure annotations. The only
+# `#[konpu::*]` annotations in the tree are deliberately-broken test fixtures
+# and macro UI tests; exclude them so `konpu check .` reflects real code only.
+exclude = [
+    "**/fixtures/**",
+    "**/tests/**",
+    "tests/**",
+]
