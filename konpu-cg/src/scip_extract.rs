@@ -33,6 +33,29 @@ pub fn facts_from_scip_file(path: &Path) -> io::Result<Facts> {
     Ok(facts_from_index(&idx))
 }
 
+/// `rust-analyzer scip` をプロジェクトに対して実行し、`Facts` を構築する。
+/// `rust-analyzer` が PATH 上に必要。インデックスは一時ファイルに書いて後で消す。
+pub fn facts_from_project(project_dir: &Path) -> io::Result<Facts> {
+    let out = std::env::temp_dir().join(format!("konpu-cg-{}.scip", std::process::id()));
+    // rust-analyzer の進捗/内部 WARN は stderr に大量に出るので握り潰す。
+    // 失敗は終了コードで検知する。
+    let status = std::process::Command::new("rust-analyzer")
+        .arg("scip")
+        .arg(project_dir)
+        .arg("--output")
+        .arg(&out)
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(
+            "rust-analyzer scip failed (is rust-analyzer on PATH?)",
+        ));
+    }
+    let facts = facts_from_scip_file(&out);
+    let _ = std::fs::remove_file(&out);
+    facts
+}
+
 /// パース済み SCIP index から `Facts` を構築する (ファイル I/O 非依存、テスト用)。
 pub fn facts_from_index(idx: &Index) -> Facts {
     let mut facts = Facts::default();

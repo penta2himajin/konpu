@@ -51,6 +51,21 @@ enum Commands {
         #[arg(long)]
         config: Option<String>,
     },
+    /// Build the call graph (via rust-analyzer/SCIP) and report cycles + hubs
+    #[cfg(feature = "call-graph")]
+    Callgraph {
+        /// Project directory to index (default: run rust-analyzer scip here)
+        path: String,
+        /// Use a pre-generated SCIP index instead of running rust-analyzer
+        #[arg(long)]
+        scip: Option<String>,
+        /// Dispatch resolution precision: rta (default) or cha
+        #[arg(long, default_value = "rta")]
+        precision: String,
+        /// Report functions whose fan-in or fan-out is at least this (default 8)
+        #[arg(long, default_value_t = 8)]
+        hub_threshold: usize,
+    },
 }
 
 fn main() {
@@ -223,6 +238,54 @@ fn main() {
                     v.line,
                     v.imported_path,
                     v.reason
+                );
+            }
+        }
+        #[cfg(feature = "call-graph")]
+        Commands::Callgraph { path, scip, precision, hub_threshold } => {
+            use konpu::analyze::call_graph::{
+                facts_from_project, facts_from_scip_file, CallGraph, Precision,
+            };
+            let prec = match precision.as_str() {
+                "cha" => Precision::Cha,
+                "rta" => Precision::Rta,
+                other => {
+                    eprintln!("konpu callgraph: unknown precision `{other}` (use cha|rta)");
+                    std::process::exit(2);
+                }
+            };
+            let facts = match &scip {
+                Some(f) => facts_from_scip_file(std::path::Path::new(f)),
+                None => facts_from_project(std::path::Path::new(&path)),
+            };
+            let facts = match facts {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("konpu callgraph: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let g = CallGraph::build(&facts, prec);
+            let edges: usize = g.edges.iter().map(|s| s.len()).sum();
+            let cycles = g.cycles();
+            let hubs = g.hubs(hub_threshold);
+            println!("== konpu callgraph ({precision}) ==");
+            println!("functions: {}", facts.funcs.len());
+            println!("call edges: {edges}");
+            println!("cycles: {}", cycles.len());
+            for scc in &cycles {
+                let names: Vec<&str> = scc.iter().map(|&f| facts.funcs[f].name.as_str()).collect();
+                println!("  cycle ({}): {}", scc.len(), names.join(" -> "));
+            }
+            println!("hubs (fan-in/out >= {hub_threshold}): {}", hubs.len());
+            for &f in &hubs {
+                println!(
+                    "  {} (in={}, out={}) {}:{}",
+                    facts.funcs[f].name,
+                    g.in_degree(f),
+                    g.out_degree(f),
+                    facts.funcs[f].path.display(),
+                    facts.funcs[f].line
                 );
             }
         }

@@ -15,7 +15,7 @@ konpu-cg = { path = "konpu-cg", optional = true }
 
 [features]
 default = []
-call-graph = ["dep:konpu-cg"]
+call-graph = ["dep:konpu-cg", "konpu-cg/scip"]
 
 [workspace]
 members = ["konpu-macros", "konpu-cg"]

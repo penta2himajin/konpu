@@ -13,7 +13,7 @@ pub mod scip_extract;
 pub use facts::{CallSite, CallTargetKind, FuncDef, FuncId, Facts, ImplEntry, TraitMethod};
 pub use graph::{CallGraph, Precision};
 #[cfg(feature = "scip")]
-pub use scip_extract::{facts_from_index, facts_from_scip_file};
+pub use scip_extract::{facts_from_index, facts_from_project, facts_from_scip_file};
 
 use std::path::{Path, PathBuf};
 

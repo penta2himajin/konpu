@@ -3,7 +3,10 @@
 //! `analyze_full_with_cg` API exists in both build modes.
 
 #[cfg(feature = "call-graph")]
-pub use konpu_cg::{CallGraphProvider, CallTarget};
+pub use konpu_cg::{
+    facts_from_project, facts_from_scip_file, CallGraph, CallGraphProvider, CallTarget, Facts,
+    Precision,
+};
 
 #[cfg(not(feature = "call-graph"))]
 pub use shim::{CallGraphProvider, CallTarget};
