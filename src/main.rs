@@ -20,6 +20,10 @@ enum Commands {
         /// When set, only diagnostics NOT in the baseline are reported.
         #[arg(long)]
         baseline: Option<String>,
+        /// Also run call-graph-powered preserve checks (needs rust-analyzer;
+        /// only effective when built with --features call-graph).
+        #[arg(long)]
+        call_graph: bool,
     },
     /// Generate law-test skeletons for annotated declarations
     Scaffold {
@@ -68,10 +72,61 @@ enum Commands {
     },
 }
 
+/// Run call-graph-powered preserve checks and print findings.
+/// Returns true if any finding is Error severity (to drive the exit code).
+#[cfg(feature = "call-graph")]
+fn run_call_graph_preserve(
+    path: &std::path::Path,
+    config: &konpu::analyze::template::ResolvedConfig,
+) -> bool {
+    use konpu::analyze::{call_graph, preserve_cg};
+    use konpu::domain::konpu::Severity;
+    let facts = match call_graph::facts_from_project(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("konpu check --call-graph: {e}");
+            return false;
+        }
+    };
+    let result = konpu::analyze::analyze_full(path, config);
+    let sigs = call_graph::fn_signatures(path);
+    let findings =
+        preserve_cg::check_preserve(&result.declarations, &result.law_tests, config, &facts, &sigs, path);
+    if findings.is_empty() {
+        println!("konpu preserve: no call-graph violations");
+        return false;
+    }
+    let mut has_error = false;
+    for f in &findings {
+        println!(
+            "{}:{}: {:?} preserve[{:?}] `{}` — {}",
+            f.path.display(),
+            f.line,
+            f.severity,
+            f.kind,
+            f.function,
+            f.reason
+        );
+        if f.severity == Severity::Error {
+            has_error = true;
+        }
+    }
+    has_error
+}
+
+#[cfg(not(feature = "call-graph"))]
+fn run_call_graph_preserve(
+    _path: &std::path::Path,
+    _config: &konpu::analyze::template::ResolvedConfig,
+) -> bool {
+    eprintln!("konpu check --call-graph: rebuild konpu with --features call-graph");
+    false
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { path, config, baseline } => {
+        Commands::Check { path, config, baseline, call_graph } => {
             use konpu::analyze::baseline;
             use konpu::analyze::template;
             use konpu::domain::konpu::Severity;
@@ -99,19 +154,22 @@ fn main() {
             };
             if diagnostics.is_empty() {
                 println!("konpu check: no violations");
-                return;
+            } else {
+                for d in &diagnostics {
+                    println!(
+                        "{}:{}: {:?} {:?} target={:?}",
+                        d.path.display(),
+                        d.line,
+                        d.diag.severity,
+                        d.diag.rule,
+                        d.diag.declaration.targetStructure
+                    );
+                }
             }
-            for d in &diagnostics {
-                println!(
-                    "{}:{}: {:?} {:?} target={:?}",
-                    d.path.display(),
-                    d.line,
-                    d.diag.severity,
-                    d.diag.rule,
-                    d.diag.declaration.targetStructure
-                );
+            let mut has_error = diagnostics.iter().any(|d| d.diag.severity == Severity::Error);
+            if call_graph {
+                has_error |= run_call_graph_preserve(&p, &resolved);
             }
-            let has_error = diagnostics.iter().any(|d| d.diag.severity == Severity::Error);
             std::process::exit(if has_error { 1 } else { 0 });
         }
         Commands::Scaffold { path, config, write } => {

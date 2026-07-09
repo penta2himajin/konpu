@@ -3,6 +3,8 @@ pub mod call_graph;
 pub mod check;
 pub mod extract;
 pub mod parser;
+#[cfg(feature = "call-graph")]
+pub mod preserve_cg;
 pub mod propagation;
 pub mod scaffold;
 pub mod template;

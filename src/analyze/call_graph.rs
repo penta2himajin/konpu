@@ -5,7 +5,7 @@
 #[cfg(feature = "call-graph")]
 pub use konpu_cg::{
     facts_from_project, facts_from_scip_file, CallGraph, CallGraphProvider, CallTarget, Facts,
-    Precision,
+    FuncId, Precision,
 };
 
 #[cfg(not(feature = "call-graph"))]
