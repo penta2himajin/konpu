@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+      - name: cargo test (call-graph feature)
+        run: cargo test -p konpu --features call-graph
+      - name: clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (call-graph feature)
+        run: cargo clippy --features call-graph --all-targets -- -D warnings
+
+  dogfood:
+    name: konpu checks itself
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-analyzer is needed for the call-graph preserve check.
+          components: rust-analyzer
+      # konpu.toml excludes fixtures/tests, so real code must be clean (exit 0).
+      - name: konpu check . (algebraic-structure lint)
+        run: cargo run -- check .
+      # Smoke-tests the rust-analyzer -> SCIP -> call-graph pipeline end to end.
+      # konpu declares no [boundaries], so this reports no preserve violations.
+      - name: konpu check . --call-graph (preserve pipeline)
+        run: cargo run --features call-graph -- check . --call-graph
