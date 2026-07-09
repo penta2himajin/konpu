@@ -126,6 +126,24 @@ pub fn facts_from_index(idx: &Index) -> Facts {
             facts.calls.push(CallSite { caller, target });
         }
     }
+
+    // trait 名は具体型ではない (RTA の for_type には現れない) ので instantiated から除く。
+    // dyn Trait / trait 境界としての参照が紛れ込むための掃除で、モデルの正確さのため。
+    let trait_names: std::collections::HashSet<String> = facts
+        .impls
+        .iter()
+        .map(|e| e.trait_method.trait_name.clone())
+        .chain(trait_decl.values().map(|tm| tm.trait_name.clone()))
+        .collect();
+    facts.instantiated.retain(|t| !trait_names.contains(t));
+
+    // RTA 精度の天井 (docs/layer2-call-graph-design.md §6):
+    // rust-analyzer の SCIP は occurrence の value/type 位置も read/write role も
+    // syntax_kind も出さない (実測 role=0, syntax_kind=Unspecified)。よって「構築」と
+    // 「型言及」を区別できない。とくに `impl Trait for T` のヘッダが必ず `T#` 参照を
+    // 生むため、trait 実装を持つ型は自身の impl ヘッダだけで instantiated 入りし、RTA は
+    // 実 SCIP 上で CHA に縮退する。健全 (偽陰性なし) を保ったままの精緻化は不可能で、
+    // 真の RTA には MIR 単相化レベルの構築事実 (StableMIR) が要る。現状は健全な過大近似。
     facts
 }
 
@@ -254,11 +272,14 @@ mod tests {
         let doc = Document {
             relative_path: "src/main.rs".to_string(),
             occurrences: vec![
-                // type defs
+                // type defs (Shape is a trait -> gets a `Shape#` symbol too)
+                occ(&sym("Shape#"), DEFINITION, vec![0, 6, 11], vec![]),
                 occ(&sym("Circle#"), DEFINITION, vec![1, 7, 13], vec![]),
                 occ(&sym("Square#"), DEFINITION, vec![2, 7, 13], vec![]),
                 // trait method decl + impls
                 occ(&sym("Shape#area()."), DEFINITION, vec![0, 17, 21], vec![0, 14, 36]),
+                // `&[Box<dyn Shape>]` in total()'s signature references the trait type
+                occ(&sym("Shape#"), 0, vec![5, 20, 25], vec![]),
                 occ(&sym("impl#[Circle][Shape]area()."), DEFINITION, vec![3, 27, 31], vec![3, 24, 54]),
                 occ(&sym("impl#[Square][Shape]area()."), DEFINITION, vec![4, 27, 31], vec![4, 24, 53]),
                 // total(): body lines 5..9, calls sh.area() at line 7 -> Shape#area() (dyn)
@@ -294,9 +315,11 @@ mod tests {
         assert_eq!(facts.impls.len(), 2);
         assert!(facts.impls.iter().any(|e| e.for_type == "Circle"));
         assert!(facts.impls.iter().any(|e| e.for_type == "Square"));
-        // both types instantiated
+        // both concrete types instantiated
         assert!(facts.instantiated.contains("Circle"));
         assert!(facts.instantiated.contains("Square"));
+        // the trait name is not a concrete type -> excluded from the RTA set
+        assert!(!facts.instantiated.contains("Shape"));
     }
 
     #[test]
