@@ -39,6 +39,49 @@ pub struct Boundary {
     pub to: Option<String>,
     #[serde(default)]
     pub preserve: Vec<String>,
+    /// preserve 検査の深刻度: "off" | "warn" | "error"（既定 warn）。
+    #[serde(default)]
+    pub preserve_severity: Option<String>,
+    /// 有効化する検出器: "aggregate"（B）| "construct"（C）（既定=両方）。
+    #[serde(default)]
+    pub preserve_checks: Option<Vec<String>>,
+}
+
+/// preserve 検査の設定深刻度。law_test の有無で実効深刻度は下がりうる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreserveSeverity {
+    Off,
+    Warn,
+    Error,
+}
+
+impl PreserveSeverity {
+    fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("off") => Self::Off,
+            Some("error") => Self::Error,
+            _ => Self::Warn, // 決定不能領域なので既定は warn
+        }
+    }
+}
+
+/// どの preserve 検出器を有効にするか。既定は両方（C は強化版=手書きマージ検出）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreserveChecks {
+    pub aggregate: bool,
+    pub construct: bool,
+}
+
+impl PreserveChecks {
+    fn parse(v: Option<&[String]>) -> Self {
+        match v {
+            None => Self { aggregate: true, construct: true },
+            Some(list) => Self {
+                aggregate: list.iter().any(|s| s == "aggregate"),
+                construct: list.iter().any(|s| s == "construct"),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +90,8 @@ pub struct ResolvedBoundary {
     pub from_pattern: String,
     pub to_pattern: String,
     pub preserve: Vec<AlgebraicStructure>,
+    pub preserve_severity: PreserveSeverity,
+    pub preserve_checks: PreserveChecks,
 }
 
 /// 層間境界の違反 (Phase 2-A: 逆方向参照のみ)。
@@ -180,6 +225,8 @@ pub fn parse(text: &str) -> ResolvedConfig {
             from_pattern: from,
             to_pattern: to,
             preserve: parse_structures(&b.preserve),
+            preserve_severity: PreserveSeverity::parse(b.preserve_severity.as_deref()),
+            preserve_checks: PreserveChecks::parse(b.preserve_checks.as_deref()),
         });
     }
     ResolvedConfig {
@@ -409,6 +456,33 @@ mod tests {
     fn glob_match_single_star() {
         assert!(glob_match("src/*.rs", "src/foo.rs"));
         assert!(!glob_match("src/*.rs", "src/foo/bar.rs"));
+    }
+
+    #[test]
+    fn boundary_preserve_defaults() {
+        let cfg = parse(
+            "[boundaries.d2i]\nfrom = \"src/domain/**\"\nto = \"src/infra/**\"\n\
+             preserve = [\"monoid\"]\n",
+        );
+        assert_eq!(cfg.boundaries.len(), 1);
+        let b = &cfg.boundaries[0];
+        assert_eq!(b.preserve_severity, PreserveSeverity::Warn);
+        // default: both detectors on
+        assert!(b.preserve_checks.aggregate);
+        assert!(b.preserve_checks.construct);
+    }
+
+    #[test]
+    fn boundary_preserve_explicit_severity_and_checks() {
+        let cfg = parse(
+            "[boundaries.d2i]\nfrom = \"src/domain/**\"\nto = \"src/infra/**\"\n\
+             preserve = [\"monoid\"]\npreserve_severity = \"error\"\n\
+             preserve_checks = [\"aggregate\"]\n",
+        );
+        let b = &cfg.boundaries[0];
+        assert_eq!(b.preserve_severity, PreserveSeverity::Error);
+        assert!(b.preserve_checks.aggregate);
+        assert!(!b.preserve_checks.construct); // opted out of construct
     }
 
     #[test]
