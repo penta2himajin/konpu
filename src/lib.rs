@@ -5,3 +5,5 @@ pub mod analyze;
 pub mod domain;
 
 pub use konpu_macros::{group, ignore, law, magma, monoid, semigroup};
+
+pub use analyze::call_graph::{CallGraphProvider, CallTarget};

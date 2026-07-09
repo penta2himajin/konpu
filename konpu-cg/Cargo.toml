@@ -1,0 +1,10 @@
+[package]
+name = "konpu-cg"
+version = "0.1.0"
+edition = "2024"
+description = "Call graph provider for konpu — stub implementation"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

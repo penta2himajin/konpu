@@ -1,4 +1,5 @@
 pub mod baseline;
+pub mod call_graph;
 pub mod check;
 pub mod extract;
 pub mod parser;
@@ -32,6 +33,9 @@ pub struct AnalysisResult {
     pub law_tests: Vec<extract::LawTestInfo>,
     pub expectation_mismatches: Vec<template::LayerExpectationMismatch>,
     pub boundary_violations: Vec<template::BoundaryViolation>,
+    /// コールグラフ provider が `Some` の場合、resolve_outgoing_calls が
+    /// 何か返したかどうかのトレース用 (Phase 2 拡張用)。
+    pub call_graph_resolutions: usize,
 }
 
 /// `konpu.toml` 由来の設定を適用して解析する。
@@ -39,11 +43,33 @@ pub fn analyze_with_config(
     path: &Path,
     config: &template::ResolvedConfig,
 ) -> Vec<AnalyzedDiagnostic> {
-    analyze_full(path, config).diagnostics
+    analyze_full_with_cg(path, config, None).diagnostics
 }
 
 /// 診断以外の情報（ignore 抽出や declaration 収集）も返す統合 API。
 pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisResult {
+    analyze_full_with_cg(path, config, None)
+}
+
+/// コールグラフ provider を渡せる統合 API。
+///
+/// `provider` が `Some` の場合、preserve 検査で実際のコールエッジも参照する
+/// (Phase 2 拡張)。`None` のときは従来の近似検査 (同名型 rank 降格) に
+/// フォールバック。
+pub fn analyze_full_with_cg(
+    path: &Path,
+    config: &template::ResolvedConfig,
+    _provider: Option<&dyn call_graph::CallGraphProvider>,
+) -> AnalysisResult {
+    // Phase 0: provider 未使用。Phase 1 以降でここを resolve_outgoing_calls
+    // 呼び出しに置き換える。
+    let mut r = analyze_full_body(path, config);
+    r.call_graph_resolutions = 0;
+    r
+}
+
+/// 実際の解析本体。provider 非依存の従来ロジック。
+fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> AnalysisResult {
     let files = parser::collect_rust_files(path);
     let mut all_decls = Vec::new();
     let mut all_impls = Vec::new();
@@ -214,6 +240,7 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
         law_tests: all_law_tests,
         expectation_mismatches: mismatches,
         boundary_violations,
+        call_graph_resolutions: 0,
     }
 }
 

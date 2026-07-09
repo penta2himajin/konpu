@@ -1,0 +1,51 @@
+//! `konpu-cg` — コールグラフ provider のスタブ。
+//!
+//! Phase 0: 空のコールグラフを返すダミー実装のみ提供。
+//! Phase 1 (別セッション) で rust-analyzer との JSON-RPC 通信を実装し、
+//! ここに `RustAnalyzerCallGraphProvider` を追加する。
+
+use std::path::{Path, PathBuf};
+
+/// コールグラフ中の呼び出し先 1 件分。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallTarget {
+    pub target_path: PathBuf,
+    pub target_line: usize,
+    pub target_name: String,
+}
+
+/// コールグラフ provider のトレイト。
+///
+/// `konpu` 本体はこれに依存し、provider なし (None) の場合は
+/// 従来の近似検査 (同名型 rank 降格など) にフォールバックする。
+pub trait CallGraphProvider {
+    /// 指定位置からの outgoing call (呼び出し先) を返す。
+    /// 空の Vec は「呼出なし」を意味する。
+    /// provider が未実装の場合は空 Vec を返す。
+    fn resolve_outgoing_calls(
+        &self,
+        _file_path: &Path,
+        _line: usize,
+        _column: usize,
+    ) -> Vec<CallTarget> {
+        Vec::new()
+    }
+}
+
+/// ダミー provider。何も解決しない。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyCallGraphProvider;
+
+impl CallGraphProvider for EmptyCallGraphProvider {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_provider_returns_no_calls() {
+        let p = EmptyCallGraphProvider;
+        let calls = p.resolve_outgoing_calls(Path::new("src/lib.rs"), 0, 0);
+        assert!(calls.is_empty());
+    }
+}
