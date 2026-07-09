@@ -1,6 +1,6 @@
 # 第2層b：コールグラフトポロジ複雑度 — 設計方針
 
-> ステータス：RTA ベースの過大近似（CHA→RTA）を実装済み。rust-analyzer/SCIP 経由の事実抽出 + Tarjan による循環/ハブ検出を `konpu callgraph`（`call-graph` feature）で提供。Konpu 本体（Phase 2-A）への接続は未実装。
+> ステータス：CHA→RTA を実装済み。rust-analyzer/SCIP で事実抽出、tree-sitter で構築サイトを拾って RTA を精緻化（§6.2）、Tarjan で循環/ハブ検出。`konpu callgraph`（`call-graph` feature）で提供。Konpu 本体（Phase 2-A の preserve）への接続は未実装。
 > 関連：`roadmap.md` セクション1（層モデル）、セクション8（保留事項）
 
 ## 1. これは何を測るか
@@ -67,7 +67,11 @@ Rustは方針的にこのアプローチに適している。
 
 健全性の向き（偽陰性を出さない＝§4）を守る限り、instantiated 集合は真の構築集合の**過大近似（superset）**でなければならず、open-world（他クレート・マクロ・serde 由来の構築が見えない）では特定の型を「構築されない」と安全に断定できない。したがって **SCIP 単独では健全なまま RTA を精緻化できない**。
 
-精緻化には値位置の構築事実が必要で、実現経路は MIR 単相化レベルの抽出（**StableMIR**）。`Facts::instantiated` はその差し替え口として分離済み（抽出器を替えれば解釈エンジン `graph` は無改変で精度が上がる）。current の trait 名除外は集合の正確さのための健全な掃除にとどまり、縮退そのものは解消しない。
+### 6.2 採用した精緻化: tree-sitter による構築サイト検出
+
+SCIP だけでは縮退するため、`Facts::instantiated` を **konpu 既存の tree-sitter-rust で検出した「値位置での構築サイト」** で置き換える（`src/analyze/call_graph.rs::constructed_types`、`konpu callgraph --precision rta` 時）。捕捉するのは構造体リテラル `Foo{..}`、タプル/関連関数呼び出し `Foo(..)` / `Foo::new(..)`、および**値位置の PascalCase 識別子**（裸の unit 構造体・列挙子構築）。tree-sitter は型位置を `type_identifier` として区別するので、型注釈・`impl Trait for T` ヘッダ・ジェネリクス引数・戻り値型・trait 境界は自動的に除外され、**§6.1 の縮退要因（impl ヘッダ）が消えて RTA が実際に枝刈りする**。
+
+トレードオフ: これは値位置の構文構築だけを見るので、**マクロ / serde / reflection 由来の構築は見えない**（§6 が既に認める穴と同種）。その範囲で偽陰性が出うる＝厳密な健全性は譲っている。完全に健全な精緻化は依然 MIR 単相化レベルの抽出（**StableMIR**）が必要で、`Facts::instantiated` はその差し替え口として分離済み（抽出器を替えれば解釈エンジン `graph` は無改変で精度が上がる）。trait 名の除外（§6.1 末尾）は SCIP 経路側の健全な掃除として残す。
 
 将来インタプリタ言語（Python等）を扱う場合は、「コンパイラから吸い上げる」に相当するものが実行時トレースになり、これは**観測された呼び出しのみを含む過小近似**になる。静的CHA/RTAの過大近似とは意味論の方向が逆になるため、対応する場合は静的解析＋動的トレースのハイブリッドという別設計が要る。
 

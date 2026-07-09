@@ -258,13 +258,20 @@ fn main() {
                 Some(f) => facts_from_scip_file(std::path::Path::new(f)),
                 None => facts_from_project(std::path::Path::new(&path)),
             };
-            let facts = match facts {
+            let mut facts = match facts {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("konpu callgraph: {e}");
                     std::process::exit(1);
                 }
             };
+            // RTA: refine the instantiated set to actual construction sites found
+            // in the source (tree-sitter), instead of SCIP's "any type reference"
+            // which degenerates to CHA. See docs/layer2-call-graph-design.md §6.1.
+            if prec == Precision::Rta {
+                facts.instantiated =
+                    konpu::analyze::call_graph::constructed_types(std::path::Path::new(&path));
+            }
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();
             let cycles = g.cycles();
