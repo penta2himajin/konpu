@@ -127,6 +127,20 @@ fn run_call_graph_preserve(
     false
 }
 
+/// 設定ファイルのパスを決める。`--config` 明示が最優先。無ければ、ディレクトリ解析
+/// では `<path>/konpu.toml` を優先し（外部プロジェクトをそのまま解析できる）、
+/// 無ければ CWD の `konpu.toml` にフォールバックする。
+fn resolve_config_path(explicit: Option<&str>, analyze_path: &std::path::Path) -> std::path::PathBuf {
+    if let Some(c) = explicit {
+        return std::path::PathBuf::from(c);
+    }
+    let in_dir = analyze_path.join("konpu.toml");
+    if analyze_path.is_dir() && in_dir.is_file() {
+        return in_dir;
+    }
+    std::path::PathBuf::from("konpu.toml")
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -135,9 +149,7 @@ fn main() {
             use konpu::analyze::template;
             use konpu::domain::konpu::Severity;
             let p = std::path::PathBuf::from(path);
-            let config_path = config
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let config_path = resolve_config_path(config.as_deref(), &p);
             let mut resolved = template::load(&config_path);
             resolved.infer = resolved.infer || infer;
             let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
@@ -181,9 +193,7 @@ fn main() {
             use konpu::analyze::scaffold;
             use konpu::analyze::template;
             let p = std::path::PathBuf::from(path);
-            let config_path = config
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let config_path = resolve_config_path(config.as_deref(), &p);
             let resolved = template::load(&config_path);
             let files = scaffold::scaffold_path(&p, &resolved);
             if files.is_empty() {
@@ -218,9 +228,7 @@ fn main() {
             use konpu::analyze::baseline;
             use konpu::analyze::template;
             let p = std::path::PathBuf::from(path);
-            let config_path = config
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let config_path = resolve_config_path(config.as_deref(), &p);
             let resolved = template::load(&config_path);
             let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
             let out_path = out.map(std::path::PathBuf::from).unwrap_or_else(baseline::default_path);
@@ -244,9 +252,7 @@ fn main() {
             use konpu::domain::konpu::Severity;
             use std::collections::BTreeMap;
             let p = std::path::PathBuf::from(path);
-            let config_path = config
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
+            let config_path = resolve_config_path(config.as_deref(), &p);
             let resolved = template::load(&config_path);
             let result = konpu::analyze::analyze_full(&p, &resolved);
             let mut by_sev: BTreeMap<Severity, usize> = BTreeMap::new();
