@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use super::extract::{
     ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo,
 };
-use crate::domain::konpu::AlgebraicStructure;
+use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
 
 /// Swift ファイル 1 つからバンドルを返す（言語ディスパッチ用）。
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
@@ -121,6 +121,15 @@ fn structure_from(head: &str) -> Option<AlgebraicStructure> {
     }
 }
 
+fn higher_from(value: &str) -> Option<HigherKindedStructure> {
+    match value {
+        "functor" => Some(HigherKindedStructure::Functor),
+        "applicative" => Some(HigherKindedStructure::Applicative),
+        "monad" => Some(HigherKindedStructure::MonadS),
+        _ => None,
+    }
+}
+
 /// `// konpu: monoid(op: ..., identity: ...)` 等 → 直後の型への宣言。
 pub fn extract_declarations(root: Node, source: &str, path: &Path) -> Vec<AnalyzedDeclaration> {
     let mut out = Vec::new();
@@ -134,7 +143,7 @@ pub fn extract_declarations(root: Node, source: &str, path: &Path) -> Vec<Analyz
         let Some(type_name) = decl_type_name(decl, source, &kw) else { continue };
         out.push(AnalyzedDeclaration {
             target_structure: structure,
-            higher_kinded: None,
+            higher_kinded: d.kwargs.get("higher").and_then(|v| higher_from(v)),
             type_name,
             operation_name: d.kwargs.get("op").cloned().unwrap_or_default(),
             identity_name: d.kwargs.get("identity").cloned(),
@@ -227,7 +236,7 @@ pub fn extract_type_infos(root: Node, source: &str) -> Vec<TypeInfo> {
                         && !has_modifier(member, source, "class")
                     {
                         if let Some(t) = property_type(member, source) {
-                            field_types.push(t);
+                            field_types.push(normalize_swift_type(&t));
                         }
                     }
                 }
@@ -241,6 +250,38 @@ pub fn extract_type_infos(root: Node, source: &str) -> Vec<TypeInfo> {
 
 fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
     n.utf8_text(source.as_bytes()).unwrap_or("")
+}
+
+/// Swift のコレクション/optional 構文を konpu 正準名へ正規化（propagation は
+/// head でコレクションを判定するため、head が Vec/HashMap/HashSet/Option に
+/// なれば `[T]`/`T?`/`Set<T>` を Unbounded と見なせる）。propagation.rs は
+/// Rust 名前前提なので、言語差はここ（Swift 境界）で吸収する。
+fn normalize_swift_type(s: &str) -> String {
+    let s = s.trim();
+    if let Some(inner) = s.strip_suffix('?') {
+        return format!("Option<{}>", normalize_swift_type(inner));
+    }
+    if let Some(mid) = s.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+        // `[K: V]` は辞書、`[T]` は配列。どちらも非有界。
+        return if mid.contains(':') {
+            format!("HashMap<{}>", mid.trim())
+        } else {
+            format!("Vec<{}>", normalize_swift_type(mid.trim()))
+        };
+    }
+    for (swift, rust) in [
+        ("Array", "Vec"),
+        ("Dictionary", "HashMap"),
+        ("Set", "HashSet"),
+        ("Optional", "Option"),
+    ] {
+        if let Some(rest) = s.strip_prefix(swift) {
+            if rest.is_empty() || rest.starts_with('<') {
+                return format!("{rust}{rest}");
+            }
+        }
+    }
+    s.to_string()
 }
 
 fn first_child_of_kind<'a>(n: Node<'a>, kind: &str) -> Option<Node<'a>> {
@@ -620,8 +661,8 @@ mod tests {
         );
         let s = t.iter().find(|i| i.name == "S").unwrap();
         assert_eq!(s.kind, TypeKind::Struct);
-        // static `zero` excluded; z keeps its array type text.
-        assert_eq!(s.field_types, vec!["Int".to_string(), "Money".to_string(), "[Money]".to_string()]);
+        // static `zero` excluded; array field normalized (`[Money]` -> `Vec<Money>`).
+        assert_eq!(s.field_types, vec!["Int".to_string(), "Money".to_string(), "Vec<Money>".to_string()]);
     }
 
     #[test]
@@ -669,6 +710,29 @@ mod tests {
         assert_eq!(decls[0].target_structure, AlgebraicStructure::Monoid);
         assert_eq!(decls[0].operation_name, "combine");
         assert_eq!(decls[0].identity_name.as_deref(), Some("zero"));
+    }
+
+    #[test]
+    fn swift_collection_types_normalize_to_unbounded_heads() {
+        assert_eq!(normalize_swift_type("[Money]"), "Vec<Money>");
+        assert_eq!(normalize_swift_type("Money?"), "Option<Money>");
+        assert_eq!(normalize_swift_type("[String: Int]"), "HashMap<String: Int>");
+        assert_eq!(normalize_swift_type("Set<Money>"), "HashSet<Money>");
+        assert_eq!(normalize_swift_type("Int"), "Int"); // primitive unchanged
+    }
+
+    #[test]
+    fn struct_array_field_is_normalized() {
+        let t = type_infos_of("struct S { let xs: [Money] }");
+        assert_eq!(t[0].field_types, vec!["Vec<Money>".to_string()]);
+    }
+
+    #[test]
+    fn comment_annotation_with_higher_kinded() {
+        let src = "// konpu: monoid(op: compose, higher: functor)\nstruct Parser { let x: Int }";
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        let decls = extract_declarations(tree.root_node(), src, Path::new("P.swift"));
+        assert_eq!(decls[0].higher_kinded, Some(HigherKindedStructure::Functor));
     }
 
     #[test]
