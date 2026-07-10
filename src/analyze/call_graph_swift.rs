@@ -54,19 +54,47 @@ pub fn facts_from_swift_sources(sources: Vec<(std::path::PathBuf, String)>) -> F
     // 自由関数（for_type ""）は RTA でも常に残す。
     facts.instantiated.insert(String::new());
 
-    // Pass 1: 関数定義を登録し、node.id() -> FuncId を記録。
+    // Pass 1: 関数定義を登録し、精密解決用の索引（型メソッド・自由関数・フィールド型）を作る。
+    let mut index = Index::default();
     let mut fn_ids: Vec<HashMap<usize, FuncId>> = Vec::with_capacity(parsed.len());
     for (fpath, src, tree) in &parsed {
         let mut ids = HashMap::new();
-        collect_funcs(tree.root_node(), src, fpath, None, &mut facts, &mut ids);
+        collect_funcs(tree.root_node(), src, fpath, None, &mut facts, &mut ids, &mut index);
         fn_ids.push(ids);
     }
 
-    // Pass 2: 各関数本体の呼び出しをエッジ化。
+    // Pass 2: 各関数本体の呼び出しを、受け手の型を解決して精密にエッジ化。
     for (fi, (_, src, tree)) in parsed.iter().enumerate() {
-        collect_calls(tree.root_node(), src, &fn_ids[fi], None, &mut facts);
+        let r = Resolver { ids: &fn_ids[fi], index: &index };
+        collect_calls(tree.root_node(), src, &r, None, None, &mut facts);
     }
     facts
+}
+
+/// Pass 2 で不変な参照（node.id()→FuncId と精密解決索引）を束ねる。
+struct Resolver<'a> {
+    ids: &'a HashMap<usize, FuncId>,
+    index: &'a Index,
+}
+
+/// 精密な呼び出し解決のための索引。
+#[derive(Default)]
+struct Index {
+    /// (型, メソッド名) -> 候補 FuncId 群（同名オーバーロードは複数）。
+    type_methods: HashMap<(String, String), Vec<FuncId>>,
+    /// 自由関数名 -> FuncId 群。
+    free_funcs: HashMap<String, Vec<FuncId>>,
+    /// 型 -> (ストアドプロパティ名 -> 基底型名)。受け手が field のとき型解決に使う。
+    fields: HashMap<String, HashMap<String, String>>,
+}
+
+/// 型文字列の基底名（`A?`→A、`[T]`→そのまま=解決不能、`Foo<T>`→Foo）。
+fn base_type_name(s: &str) -> String {
+    let mut s = s.trim().trim_end_matches(['?', '!']).trim();
+    if let Some(i) = s.find('<') {
+        s = s[..i].trim();
+    }
+    s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
 }
 
 /// Swift プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
@@ -282,6 +310,7 @@ fn collect_funcs(
     enclosing: Option<&str>,
     facts: &mut Facts,
     ids: &mut HashMap<usize, FuncId>,
+    index: &mut Index,
 ) {
     match n.kind() {
         "class_declaration" => {
@@ -291,7 +320,15 @@ fn collect_funcs(
             if let Some(body) = body {
                 let mut cur = body.walk();
                 for child in body.children(&mut cur) {
-                    collect_funcs(child, source, fpath, ty.as_deref(), facts, ids);
+                    // ストアドプロパティの型を索引（インスタンス・型注釈付きのみ）。
+                    if child.kind() == "property_declaration" && !has_static(child, source) {
+                        if let (Some(name), Some(t)) = (prop_name(child, source), prop_type(child, source)) {
+                            if let Some(ty) = &ty {
+                                index.fields.entry(ty.clone()).or_default().insert(name, base_type_name(&t));
+                            }
+                        }
+                    }
+                    collect_funcs(child, source, fpath, ty.as_deref(), facts, ids, index);
                 }
             }
             return;
@@ -305,87 +342,265 @@ fn collect_funcs(
                 let id = facts.add_func(name, fpath.to_path_buf(), n.start_position().row + 1);
                 ids.insert(n.id(), id);
                 facts.impls.push(ImplEntry {
-                    trait_method: TraitMethod::new("", bare),
+                    trait_method: TraitMethod::new("", bare.clone()),
                     for_type: enclosing.unwrap_or("").to_string(),
                     func: id,
                 });
+                match enclosing {
+                    Some(t) => index.type_methods.entry((t.to_string(), bare)).or_default().push(id),
+                    None => index.free_funcs.entry(bare).or_default().push(id),
+                }
             }
-            // ネストした関数も拾うため本体を降りる。
         }
         _ => {}
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_funcs(child, source, fpath, enclosing, facts, ids);
+        collect_funcs(child, source, fpath, enclosing, facts, ids, index);
     }
 }
 
 fn collect_calls(
     n: Node,
     source: &str,
-    ids: &HashMap<usize, FuncId>,
+    r: &Resolver,
+    enclosing: Option<&str>,
     caller: Option<FuncId>,
     facts: &mut Facts,
 ) {
-    // この関数に入ったら caller を切り替える。
-    let caller = if n.kind() == "function_declaration" {
-        ids.get(&n.id()).copied().or(caller)
-    } else {
-        caller
-    };
+    // 型に入ったら enclosing を更新（extension も対象型に解決）。
+    if n.kind() == "class_declaration" {
+        let ty = decl_keyword(n, source).and_then(|kw| decl_type_name(n, source, &kw));
+        let body = first_child_of_kind(n, "class_body")
+            .or_else(|| first_child_of_kind(n, "enum_class_body"));
+        if let Some(body) = body {
+            let mut cur = body.walk();
+            for child in body.children(&mut cur) {
+                collect_calls(child, source, r, ty.as_deref(), caller, facts);
+            }
+        }
+        return;
+    }
+    // 関数に入ったら caller とローカル変数型を確定して本体を処理。
+    if n.kind() == "function_declaration" {
+        let c = r.ids.get(&n.id()).copied().or(caller);
+        let locals = build_locals(n, source);
+        if let Some(body) = first_child_of_kind(n, "function_body") {
+            resolve_body(body, source, r, enclosing, &locals, c, facts);
+        }
+        return;
+    }
+    let mut cur = n.walk();
+    for child in n.children(&mut cur) {
+        collect_calls(child, source, r, enclosing, caller, facts);
+    }
+}
 
+/// 関数本体（クロージャ含む）の呼び出しを解決してエッジ化。ネストした named 関数は
+/// それ自身の caller で再入する。
+fn resolve_body(
+    n: Node,
+    source: &str,
+    r: &Resolver,
+    enclosing: Option<&str>,
+    locals: &HashMap<String, String>,
+    caller: Option<FuncId>,
+    facts: &mut Facts,
+) {
+    if n.kind() == "function_declaration" {
+        collect_calls(n, source, r, enclosing, caller, facts);
+        return;
+    }
     if n.kind() == "call_expression" {
-        if let Some(callee) = callee_of(n, source) {
-            match callee {
-                Callee::Construct(ty) => {
-                    facts.instantiated.insert(ty);
-                }
-                Callee::Name(name) => {
-                    if let Some(c) = caller {
-                        facts.calls.push(CallSite {
-                            caller: c,
-                            target: CallTargetKind::Dynamic(TraitMethod::new("", name)),
-                        });
-                    }
-                }
+        resolve_call(n, source, r.index, enclosing, locals, caller, facts);
+    }
+    let mut cur = n.walk();
+    for child in n.children(&mut cur) {
+        resolve_body(child, source, r, enclosing, locals, caller, facts);
+    }
+}
+
+/// 関数のローカル変数の型（引数 + 本体の `let/var x: T` / `let x = T(...)`）。
+fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
+    let mut locals = HashMap::new();
+    // 引数。
+    let mut cur = fn_node.walk();
+    for c in fn_node.children(&mut cur) {
+        if c.kind() == "parameter" {
+            if let (Some(name), Some(t)) = (param_name(c, source), param_type(c, source)) {
+                locals.insert(name, base_type_name(&t));
             }
         }
     }
+    // 本体のローカル宣言。
+    if let Some(body) = first_child_of_kind(fn_node, "function_body") {
+        collect_locals(body, source, &mut locals);
+    }
+    locals
+}
 
+fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
+    if n.kind() == "property_declaration" {
+        if let Some(name) = prop_name(n, source) {
+            if let Some(t) = prop_type(n, source) {
+                out.insert(name, base_type_name(&t));
+            }
+        }
+    }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_calls(child, source, ids, caller, facts);
+        collect_locals(child, source, out);
     }
 }
 
-enum Callee {
-    /// 通常の呼び出し（自由関数 or メソッド）。bare 名。
-    Name(String),
-    /// `Type(...)` 構築サイト。
-    Construct(String),
-}
-
-/// call_expression の被呼び出しを判定。
-fn callee_of(call: Node, source: &str) -> Option<Callee> {
+/// call_expression を解決してエッジ/構築サイトを facts に足す。
+fn resolve_call(
+    call: Node,
+    source: &str,
+    index: &Index,
+    enclosing: Option<&str>,
+    locals: &HashMap<String, String>,
+    caller: Option<FuncId>,
+    facts: &mut Facts,
+) {
     let mut cur = call.walk();
-    let first = call.children(&mut cur).find(|c| c.is_named())?;
-    match first.kind() {
+    let Some(first) = call.children(&mut cur).find(|c| c.is_named()) else { return };
+
+    // 受け手の型を解決するクロージャ。
+    let recv_type = |base: &str| -> Option<String> {
+        if base == "self" {
+            enclosing.map(str::to_string)
+        } else if is_pascal_case(base) {
+            Some(base.to_string())
+        } else {
+            locals
+                .get(base)
+                .cloned()
+                .or_else(|| enclosing.and_then(|t| index.fields.get(t)).and_then(|f| f.get(base)).cloned())
+        }
+    };
+
+    let resolved: Resolution = match first.kind() {
         "simple_identifier" => {
             let name = text_of(first, source).trim().to_string();
             if is_pascal_case(&name) {
-                Some(Callee::Construct(name)) // `Money(...)`
+                facts.instantiated.insert(name); // `Money(...)` 構築
+                return;
+            }
+            // 値（ローカル/フィールド）なら callAsFunction、そうでなければ関数/メソッド呼び。
+            if let Some(t) = recv_type(&name) {
+                lookup_method(index, &t, "callAsFunction")
             } else {
-                Some(Callee::Name(name)) // `foo(...)`
+                resolve_bare(index, enclosing, &name)
             }
         }
         "navigation_expression" => {
-            // `recv.method` の末尾セグメントがメソッド名。
-            let suffix = last_child_of_kind(first, "navigation_suffix")?;
-            let m = first_child_of_kind(suffix, "simple_identifier")?;
-            Some(Callee::Name(text_of(m, source).trim().to_string()))
+            let Some(method) = nav_method(first, source) else { return };
+            match nav_base_ident(first, source).and_then(|b| recv_type(&b)) {
+                Some(t) => lookup_method(index, &t, &method),
+                None => Resolution::Dynamic(method),
+            }
+        }
+        "postfix_expression" => {
+            // `recv!(...)` / `recv?(...)` = callAsFunction on recv。
+            let Some(base) = first_child_of_kind(first, "simple_identifier").map(|c| text_of(c, source).trim().to_string()) else {
+                return;
+            };
+            match recv_type(&base) {
+                Some(t) => lookup_method(index, &t, "callAsFunction"),
+                None => Resolution::Dynamic("callAsFunction".to_string()),
+            }
+        }
+        _ => return,
+    };
+
+    let Some(c) = caller else { return };
+    match resolved {
+        Resolution::Targets(target_ids) => {
+            for t in target_ids {
+                facts.calls.push(CallSite { caller: c, target: CallTargetKind::Static(t) });
+            }
+        }
+        Resolution::Dynamic(m) => {
+            facts.calls.push(CallSite { caller: c, target: CallTargetKind::Dynamic(TraitMethod::new("", m)) });
+        }
+        Resolution::External => {} // 受け手の型は判ったが index 外＝外部/継承。エッジ無し。
+    }
+}
+
+enum Resolution {
+    /// 型が解決でき、そのメソッドに厳密に結んだ（同名オーバーロードは複数）。
+    Targets(Vec<FuncId>),
+    /// 型未解決 → 同名メソッド全てに繋ぐ過大近似（偽陰性を出さない）。
+    Dynamic(String),
+    /// 受け手の型は具体解決できたが index に無い（外部ライブラリ型/継承）→ エッジ無し。
+    /// Dynamic で全同名に繋ぐより精密（受け手型が判っている以上、他の自型メソッドではない）。
+    External,
+}
+
+fn lookup_method(index: &Index, ty: &str, method: &str) -> Resolution {
+    match index.type_methods.get(&(ty.to_string(), method.to_string())) {
+        Some(ids) => Resolution::Targets(ids.clone()),
+        None => Resolution::External,
+    }
+}
+
+/// 受け手なしの呼び出し: 内包型のメソッド（暗黙 self）→ 自由関数 → Dynamic。
+fn resolve_bare(index: &Index, enclosing: Option<&str>, name: &str) -> Resolution {
+    if let Some(t) = enclosing {
+        if let Some(ids) = index.type_methods.get(&(t.to_string(), name.to_string())) {
+            return Resolution::Targets(ids.clone());
+        }
+    }
+    if let Some(ids) = index.free_funcs.get(name) {
+        return Resolution::Targets(ids.clone());
+    }
+    Resolution::Dynamic(name.to_string())
+}
+
+/// navigation_expression の受け手基底識別子（self / 変数 / `x!`）。チェーンや式は None。
+fn nav_base_ident(nav: Node, source: &str) -> Option<String> {
+    let mut cur = nav.walk();
+    let base = nav.children(&mut cur).find(|c| c.is_named())?;
+    match base.kind() {
+        "self_expression" => Some("self".to_string()),
+        "simple_identifier" => Some(text_of(base, source).trim().to_string()),
+        "postfix_expression" => {
+            first_child_of_kind(base, "simple_identifier").map(|c| text_of(c, source).trim().to_string())
         }
         _ => None,
     }
+}
+
+fn nav_method(nav: Node, source: &str) -> Option<String> {
+    let suffix = last_child_of_kind(nav, "navigation_suffix")?;
+    first_child_of_kind(suffix, "simple_identifier").map(|c| text_of(c, source).trim().to_string())
+}
+
+/// property_declaration の名前（pattern > simple_identifier）。
+fn prop_name(n: Node, source: &str) -> Option<String> {
+    let pat = first_child_of_kind(n, "pattern")?;
+    first_child_of_kind(pat, "simple_identifier").map(|c| text_of(c, source).trim().to_string())
+}
+
+/// property_declaration の型（type_annotation の型、無ければ初期化子の構築型）。
+fn prop_type(n: Node, source: &str) -> Option<String> {
+    if let Some(ta) = first_child_of_kind(n, "type_annotation") {
+        let mut cur = ta.walk();
+        if let Some(t) = ta.children(&mut cur).find(|c| c.is_named()) {
+            return Some(text_of(t, source).trim().to_string());
+        }
+    }
+    // `let x = Foo(...)` → 構築型。
+    if let Some(call) = first_child_of_kind(n, "call_expression") {
+        if let Some(id) = first_child_of_kind(call, "simple_identifier") {
+            let t = text_of(id, source).trim().to_string();
+            if is_pascal_case(&t) {
+                return Some(t);
+            }
+        }
+    }
+    None
 }
 
 fn last_child_of_kind<'a>(n: Node<'a>, kind: &str) -> Option<Node<'a>> {
@@ -465,18 +680,59 @@ mod tests {
         assert_eq!(describe.self_type, Some("R".to_string()));
     }
 
+    fn edges_from(f: &Facts, caller: &str) -> Vec<String> {
+        let cid = f.funcs.iter().position(|x| x.name == caller).unwrap();
+        let g = CallGraph::build(f, Precision::Cha);
+        g.edges[cid].iter().map(|&t| f.funcs[t].name.clone()).collect()
+    }
+
     #[test]
-    fn rta_prunes_calls_into_never_constructed_type() {
-        // Orchestrator is never constructed; under RTA its method targets vanish.
+    fn implicit_self_call_does_not_leak_to_same_named_other_type() {
+        // A.run calls bare helper(); B also has helper(). Precise self-resolution
+        // must connect A.run only to A.helper, not B.helper.
+        let f = facts_of(&[
+            ("A.swift", "struct A {\n  func run() { helper() }\n  func helper() {}\n}"),
+            ("B.swift", "struct B {\n  func helper() {}\n}"),
+        ]);
+        assert_eq!(edges_from(&f, "A.run"), vec!["A.helper".to_string()]);
+    }
+
+    #[test]
+    fn field_receiver_resolves_to_declared_type() {
+        // D.go calls a.foo() where `a: A`; A2 also has foo(). Must resolve to A.foo.
         let f = facts_of(&[(
-            "O.swift",
-            "struct O {\n  func run() { stepA(); stepB() }\n  func stepA() {}\n  func stepB() {}\n}",
+            "D.swift",
+            "struct A { func foo() {} }\nstruct A2 { func foo() {} }\nstruct D {\n  let a: A\n  func go() { a.foo() }\n}",
+        )]);
+        assert_eq!(edges_from(&f, "D.go"), vec!["A.foo".to_string()]);
+    }
+
+    #[test]
+    fn call_as_function_via_field_is_captured() {
+        // `layer(x)` where `layer: Net` calls Net.callAsFunction (ML convention).
+        let f = facts_of(&[(
+            "N.swift",
+            "struct Net { func callAsFunction(_ x: Int) -> Int { x } }\nstruct Host {\n  let layer: Net\n  func run() { let _ = layer(1) }\n}",
+        )]);
+        assert_eq!(edges_from(&f, "Host.run"), vec!["Net.callAsFunction".to_string()]);
+    }
+
+    #[test]
+    fn unresolved_receiver_falls_back_to_dynamic_and_rta_prunes() {
+        // `mk().pong()` — receiver is a call result (type unknown) -> Dynamic.
+        // Under RTA, only instantiated types' pong survive. B is constructed via
+        // B(); C is not, so C.pong is pruned.
+        let f = facts_of(&[(
+            "X.swift",
+            "struct B { func pong() {} }\nstruct C { func pong() {} }\nstruct X {\n  func mk() -> B { B() }\n  func run() { mk().pong() }\n}",
         )]);
         let cha = CallGraph::build(&f, Precision::Cha);
         let rta = CallGraph::build(&f, Precision::Rta);
-        let cha_edges: usize = cha.edges.iter().map(|s| s.len()).sum();
-        let rta_edges: usize = rta.edges.iter().map(|s| s.len()).sum();
-        assert!(cha_edges >= 2);
-        assert_eq!(rta_edges, 0); // O never instantiated -> no kept method targets
+        let names = |g: &CallGraph| -> Vec<String> {
+            let rid = f.funcs.iter().position(|x| x.name == "X.run").unwrap();
+            g.edges[rid].iter().map(|&t| f.funcs[t].name.clone()).collect()
+        };
+        assert!(names(&cha).contains(&"B.pong".to_string()) && names(&cha).contains(&"C.pong".to_string()));
+        assert!(names(&rta).contains(&"B.pong".to_string()) && !names(&rta).contains(&"C.pong".to_string()));
     }
 }
