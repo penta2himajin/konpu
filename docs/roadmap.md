@@ -364,7 +364,11 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
   （monoid/semigroup/group/magma 宣言・law(<laws>)・ignore）
 - [x] `--test-results` が `swift test`(XCTest) 出力も解釈（FailingLawTest/compliance）
 - [x] 演算子メソッド（`+`→add / `*`→mul）・`AdditiveArithmetic` 準拠→合成 add+zero で Monoid 推論
-- [ ] 残: Swift 版 scaffold、`[T]`/`T?` の propagation Unbounded 判定
+- [x] `[T]`/`T?`/`Set` 等の propagation 正規化・higher-kinded コメント注釈（`higher: functor`）・
+  Swift 版 scaffold（XCTest + `// konpu: law`）。**layer-3 代数機能は Rust とフルパリティ**。
+- 注: 境界の逆方向 import 検査は Rust のパスベース `use` 前提。Swift の module import は
+  意味論が異なり別設計（module→層マッピング）が要るため未対応（layer-2a 的機能、代数 parity 対象外）。
+  名前ベース preserve_nominal は Swift でも動く。
 - [ ] Kotlin / TypeScript（3言語目以降。シームは整備済み）
 
 #### 2-C：oxidtr正式連携
