@@ -35,11 +35,20 @@ struct OpFamily {
 
 /// 族の並びと各 `ops` の並びが優先順位。add/mul を汎用モノイドより優先。
 const FAMILIES: &[OpFamily] = &[
-    OpFamily { ops: &["add"], ids: &["zero"], invs: &["neg", "negate"] },
-    OpFamily { ops: &["mul"], ids: &["one"], invs: &["recip", "inv", "inverse"] },
+    // 各族は正準名（add→zero）に加え、汎用名（identity/unit/inverse）も許す。
     OpFamily {
-        ops: &["combine", "merge", "append", "concat", "mappend", "op", "join", "meet", "and", "or", "bitand", "bitor", "bitxor"],
-        ids: &["empty", "identity", "unit", "neutral", "zero", "one", "default"],
+        ops: &["add"],
+        ids: &["zero", "identity", "unit", "neutral"],
+        invs: &["neg", "negate", "inverse", "inv"],
+    },
+    OpFamily {
+        ops: &["mul"],
+        ids: &["one", "identity", "unit", "neutral"],
+        invs: &["recip", "inv", "inverse", "negate"],
+    },
+    OpFamily {
+        ops: &["combine", "merge", "append", "concat", "mappend", "op", "compose", "then", "join", "meet", "and", "or", "bitand", "bitor", "bitxor"],
+        ids: &["identity", "empty", "unit", "neutral", "zero", "one", "default"],
         invs: &["inverse", "inv", "negate", "neg"],
     },
     // 半束（min/max）: 結合的だが型内に慣用の単位元/逆元は無い → Semigroup 止まり。
