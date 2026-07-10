@@ -22,101 +22,48 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
+use konpu_cg::{Facts, FuncId};
 
+use super::engine::{
+    self, base_type_name, first_named_child, is_pascal_case, text_of, Index, Resolution, Resolver,
+};
 use super::{FnSig, MergeConstruction};
-use crate::analyze::parser::{self, Language};
+use crate::analyze::parser::Language;
 use crate::analyze::template::ResolvedConfig;
 
 /// 型宣言ノード（class / abstract class）。interface/enum は呼び出し本体を持たないので対象外。
 const CLASS_KINDS: &[&str] = &["class_declaration", "abstract_class_declaration"];
 
+/// collect_base_idents のノード種別（TS）。
+const IDENT_KINDS: engine::IdentKinds = engine::IdentKinds {
+    // member の property `.amount` は参照ではない。object 側だけ辿る。
+    skip: &["property_identifier", "shorthand_property_identifier"],
+    self_kind: "this",
+    ident: "identifier",
+};
+
 /// TS プロジェクトから Facts を構築する（外部ツール不要）。
 /// `config.exclude`（konpu.toml）に一致するファイルは除外する（テスト等をハブ集計から外す）。
-/// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は相対パス前提）。
 pub fn facts_from_ts_project(path: &Path, config: &ResolvedConfig) -> Facts {
-    let sources: Vec<_> = parser::collect_source_files(path)
-        .into_iter()
-        .filter(|(_, l)| *l == Language::Ts)
-        .filter(|(f, _)| !config.is_excluded(f, path))
-        .filter_map(|(f, _)| {
-            let rel = f.strip_prefix(path).unwrap_or(&f).to_path_buf();
-            std::fs::read_to_string(&f).ok().map(|s| (rel, s))
-        })
-        .collect();
-    facts_from_ts_sources(sources)
+    facts_from_ts_sources(engine::project_sources(path, config, Language::Ts))
 }
 
 /// (path, source) の集合から Facts を構築する（テスト・in-memory 用）。
 pub fn facts_from_ts_sources(sources: Vec<(std::path::PathBuf, String)>) -> Facts {
-    let parsed: Vec<(std::path::PathBuf, String, tree_sitter::Tree)> = sources
-        .into_iter()
-        .filter_map(|(f, src)| {
-            let tree = parser::parse_with(&src, Language::Ts)?;
-            Some((f, src, tree))
-        })
-        .collect();
-
-    let mut facts = Facts::default();
-    // 自由関数（for_type ""）は RTA でも常に残す。
-    facts.instantiated.insert(String::new());
-
-    // Pass 1: 関数定義を登録し、精密解決用の索引（型メソッド・自由関数・フィールド型）を作る。
-    let mut index = Index::default();
-    let mut fn_ids: Vec<HashMap<usize, FuncId>> = Vec::with_capacity(parsed.len());
-    for (fpath, src, tree) in &parsed {
-        let mut ids = HashMap::new();
-        collect_funcs(tree.root_node(), src, fpath, None, &mut facts, &mut ids, &mut index);
-        fn_ids.push(ids);
-    }
-
-    // Pass 2: 各関数本体の呼び出しを、受け手の型を解決して精密にエッジ化。
-    for (fi, (_, src, tree)) in parsed.iter().enumerate() {
-        let r = Resolver { ids: &fn_ids[fi], index: &index };
-        collect_calls(tree.root_node(), src, &r, None, None, &mut facts);
-    }
-    facts
-}
-
-/// Pass 2 で不変な参照（node.id()→FuncId と精密解決索引）を束ねる。
-struct Resolver<'a> {
-    ids: &'a HashMap<usize, FuncId>,
-    index: &'a Index,
-}
-
-/// 精密な呼び出し解決のための索引。
-#[derive(Default)]
-struct Index {
-    /// (型, メソッド名) -> 候補 FuncId 群（同名オーバーロードは複数）。
-    type_methods: HashMap<(String, String), Vec<FuncId>>,
-    /// 自由関数名 -> FuncId 群。
-    free_funcs: HashMap<String, Vec<FuncId>>,
-    /// 型 -> (フィールド名 -> 基底型名)。受け手が field のとき型解決に使う。
-    fields: HashMap<String, HashMap<String, String>>,
-}
-
-/// 型文字列の基底名（`A | null`→A ではなく末尾。`Foo<T>`→Foo、`a.b.C`→C）。
-fn base_type_name(s: &str) -> String {
-    let mut s = s.trim();
-    if let Some(i) = s.find('<') {
-        s = s[..i].trim();
-    }
-    s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
+    engine::facts_from_sources(
+        Language::Ts,
+        sources,
+        |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
+        |root, src, r, facts| collect_calls(root, src, r, None, None, facts),
+    )
 }
 
 /// TS プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
 /// `config.exclude` に一致するファイルは除外する（facts と対象集合を揃える）。
 pub fn fn_signatures_ts(path: &Path, config: &ResolvedConfig) -> Vec<FnSig> {
-    let mut out = Vec::new();
-    for (f, lang) in parser::collect_source_files(path) {
-        if lang != Language::Ts || config.is_excluded(&f, path) {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&f) else { continue };
-        let Some(tree) = parser::parse_with(&src, Language::Ts) else { continue };
-        walk_fn_sigs(tree.root_node(), &src, &f, None, &mut out);
-    }
-    out
+    engine::fn_signatures(path, config, Language::Ts, |root, src, f, out| {
+        walk_fn_sigs(root, src, f, None, out)
+    })
 }
 
 fn walk_fn_sigs(n: Node, source: &str, path: &Path, self_ty: Option<&str>, out: &mut Vec<FnSig>) {
@@ -213,7 +160,7 @@ fn collect_constructions(n: Node, source: &str, out: &mut Vec<MergeConstruction>
         if let Some(ty) = new_type(n, source) {
             let mut refs = Vec::new();
             if let Some(args) = n.child_by_field_name("arguments") {
-                collect_base_idents(args, source, &mut refs);
+                engine::collect_base_idents(&IDENT_KINDS, args, source, &mut refs);
             }
             out.push(MergeConstruction { type_name: ty, line: n.start_position().row + 1, refs });
         }
@@ -234,39 +181,6 @@ fn new_type(n: Node, source: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// 式木の基底識別子（`a.x` → "a"、`this`）を重複なく集める。member の末尾（.x）は除く。
-fn collect_base_idents(n: Node, source: &str, out: &mut Vec<String>) {
-    match n.kind() {
-        // member の property `.amount` は参照ではない。object 側だけ辿る。
-        "property_identifier" | "shorthand_property_identifier" => return,
-        "this" => {
-            if !out.iter().any(|s| s == "self") {
-                out.push("self".to_string());
-            }
-            return;
-        }
-        "identifier" => {
-            let t = text_of(n, source).trim().to_string();
-            if !t.is_empty() && !out.contains(&t) {
-                out.push(t);
-            }
-        }
-        _ => {}
-    }
-    let mut cur = n.walk();
-    for child in n.children(&mut cur) {
-        collect_base_idents(child, source, out);
-    }
-}
-
-fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
-    n.utf8_text(source.as_bytes()).unwrap_or("")
-}
-
-fn is_pascal_case(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// 型宣言/メソッド/関数の名前（`name` フィールド）。
@@ -302,21 +216,7 @@ fn collect_funcs(
     }
     if matches!(n.kind(), "method_definition" | "function_declaration") {
         if let Some(bare) = func_name(n, source) {
-            let name = match enclosing {
-                Some(t) => format!("{t}.{bare}"),
-                None => bare.clone(),
-            };
-            let id = facts.add_func(name, fpath.to_path_buf(), n.start_position().row + 1);
-            ids.insert(n.id(), id);
-            facts.impls.push(ImplEntry {
-                trait_method: TraitMethod::new("", bare.clone()),
-                for_type: enclosing.unwrap_or("").to_string(),
-                func: id,
-            });
-            match enclosing {
-                Some(t) => index.type_methods.entry((t.to_string(), bare)).or_default().push(id),
-                None => index.free_funcs.entry(bare).or_default().push(id),
-            }
+            engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
         }
     }
     let mut cur = n.walk();
@@ -512,32 +412,21 @@ fn resolve_call(
         // bare 呼び `foo()`: self メソッド → 自由関数 → Dynamic。
         // TS はインスタンスメンバを `this.` で修飾するので、bare は自由関数/インポート
         // が主。PascalCase でも構築は `new`（別ノード）なのでここでは構築扱いしない。
-        "identifier" => resolve_bare(index, enclosing, text_of(func, source).trim()),
+        "identifier" => engine::resolve_bare(index, enclosing, text_of(func, source).trim()),
         // メンバ呼び `recv.method()`。
         "member_expression" => {
             let Some(prop) = func.child_by_field_name("property") else { return };
             let method = text_of(prop, source).trim().to_string();
             let recv = func.child_by_field_name("object");
             match recv.and_then(|o| resolve_receiver(o, source, enclosing, locals, index)) {
-                Some(t) => lookup_method(index, &t, &method),
+                Some(t) => engine::lookup_method(index, &t, &method),
                 None => Resolution::Dynamic(method),
             }
         }
         _ => return,
     };
 
-    let Some(c) = caller else { return };
-    match resolved {
-        Resolution::Targets(target_ids) => {
-            for t in target_ids {
-                facts.calls.push(CallSite { caller: c, target: CallTargetKind::Static(t) });
-            }
-        }
-        Resolution::Dynamic(m) => {
-            facts.calls.push(CallSite { caller: c, target: CallTargetKind::Dynamic(TraitMethod::new("", m)) });
-        }
-        Resolution::External => {} // 受け手の型は判ったが index 外＝外部/継承。エッジ無し。
-    }
+    engine::push_resolution(resolved, caller, facts);
 }
 
 /// 受け手式の型を再帰的に解決する。TS の `this.a.foo()` のようなネスト参照に対応:
@@ -577,39 +466,6 @@ fn resolve_receiver(
     }
 }
 
-fn first_named_child(n: Node) -> Option<Node> {
-    let mut cur = n.walk();
-    n.children(&mut cur).find(|c| c.is_named())
-}
-
-enum Resolution {
-    /// 型が解決でき、そのメソッドに厳密に結んだ（同名オーバーロードは複数）。
-    Targets(Vec<FuncId>),
-    /// 型未解決 → 同名メソッド全てに繋ぐ過大近似（偽陰性を出さない）。
-    Dynamic(String),
-    /// 受け手の型は具体解決できたが index に無い（外部ライブラリ型/継承）→ エッジ無し。
-    External,
-}
-
-fn lookup_method(index: &Index, ty: &str, method: &str) -> Resolution {
-    match index.type_methods.get(&(ty.to_string(), method.to_string())) {
-        Some(ids) => Resolution::Targets(ids.clone()),
-        None => Resolution::External,
-    }
-}
-
-/// 受け手なしの呼び出し: 内包型のメソッド（暗黙 self）→ 自由関数 → Dynamic。
-fn resolve_bare(index: &Index, enclosing: Option<&str>, name: &str) -> Resolution {
-    if let Some(t) = enclosing {
-        if let Some(ids) = index.type_methods.get(&(t.to_string(), name.to_string())) {
-            return Resolution::Targets(ids.clone());
-        }
-    }
-    if let Some(ids) = index.free_funcs.get(name) {
-        return Resolution::Targets(ids.clone());
-    }
-    Resolution::Dynamic(name.to_string())
-}
 
 #[cfg(test)]
 mod tests {

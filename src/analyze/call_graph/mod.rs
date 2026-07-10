@@ -18,8 +18,10 @@ use tree_sitter::Node;
 
 use super::parser;
 
-// 言語別の tree-sitter ベース facts 抽出（Swift/Kotlin/TS）。中立エンジンの本体
-// （FnSig / shape / Rust SCIP）はこの mod.rs、grammar 依存の解決器は各言語ファイル。
+// 言語別の tree-sitter ベース facts 抽出（Swift/Kotlin/TS）。共有の意味論コア
+// （索引・解決順序・2パス駆動）は engine、grammar 依存の walk は各言語ファイル。
+#[cfg(feature = "call-graph")]
+mod engine;
 #[cfg(feature = "call-graph")]
 pub mod kotlin;
 #[cfg(feature = "call-graph")]

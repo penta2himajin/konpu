@@ -20,99 +20,46 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
+use konpu_cg::{Facts, FuncId};
 
+use super::engine::{
+    self, base_type_name, first_child_of_kind, is_pascal_case, last_child_of_kind, text_of, Index,
+    Resolution, Resolver,
+};
 use super::{FnSig, MergeConstruction};
-use crate::analyze::parser::{self, Language};
+use crate::analyze::parser::Language;
 use crate::analyze::template::ResolvedConfig;
 
+/// collect_base_idents のノード種別（Swift）。
+const IDENT_KINDS: engine::IdentKinds = engine::IdentKinds {
+    // 引数ラベル `amount:` と navigation の末尾 `.amount` は参照ではない。
+    skip: &["value_argument_label", "navigation_suffix"],
+    self_kind: "self_expression",
+    ident: "simple_identifier",
+};
+
 /// Swift プロジェクトから Facts を構築する（外部ツール不要）。
-/// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は
-/// SCIP 同様に相対パス前提のため）。
 pub fn facts_from_swift_project(path: &Path, config: &ResolvedConfig) -> Facts {
-    let sources: Vec<_> = parser::collect_source_files(path)
-        .into_iter()
-        .filter(|(_, l)| *l == Language::Swift)
-        .filter(|(f, _)| !config.is_excluded(f, path))
-        .filter_map(|(f, _)| {
-            let rel = f.strip_prefix(path).unwrap_or(&f).to_path_buf();
-            std::fs::read_to_string(&f).ok().map(|s| (rel, s))
-        })
-        .collect();
-    facts_from_swift_sources(sources)
+    facts_from_swift_sources(engine::project_sources(path, config, Language::Swift))
 }
 
 /// (path, source) の集合から Facts を構築する（テスト・in-memory 用）。
 pub fn facts_from_swift_sources(sources: Vec<(std::path::PathBuf, String)>) -> Facts {
-    let parsed: Vec<(std::path::PathBuf, String, tree_sitter::Tree)> = sources
-        .into_iter()
-        .filter_map(|(f, src)| {
-            let tree = parser::parse_with(&src, Language::Swift)?;
-            Some((f, src, tree))
-        })
-        .collect();
-
-    let mut facts = Facts::default();
-    // 自由関数（for_type ""）は RTA でも常に残す。
-    facts.instantiated.insert(String::new());
-
-    // Pass 1: 関数定義を登録し、精密解決用の索引（型メソッド・自由関数・フィールド型）を作る。
-    let mut index = Index::default();
-    let mut fn_ids: Vec<HashMap<usize, FuncId>> = Vec::with_capacity(parsed.len());
-    for (fpath, src, tree) in &parsed {
-        let mut ids = HashMap::new();
-        collect_funcs(tree.root_node(), src, fpath, None, &mut facts, &mut ids, &mut index);
-        fn_ids.push(ids);
-    }
-
-    // Pass 2: 各関数本体の呼び出しを、受け手の型を解決して精密にエッジ化。
-    for (fi, (_, src, tree)) in parsed.iter().enumerate() {
-        let r = Resolver { ids: &fn_ids[fi], index: &index };
-        collect_calls(tree.root_node(), src, &r, None, None, &mut facts);
-    }
-    facts
-}
-
-/// Pass 2 で不変な参照（node.id()→FuncId と精密解決索引）を束ねる。
-struct Resolver<'a> {
-    ids: &'a HashMap<usize, FuncId>,
-    index: &'a Index,
-}
-
-/// 精密な呼び出し解決のための索引。
-#[derive(Default)]
-struct Index {
-    /// (型, メソッド名) -> 候補 FuncId 群（同名オーバーロードは複数）。
-    type_methods: HashMap<(String, String), Vec<FuncId>>,
-    /// 自由関数名 -> FuncId 群。
-    free_funcs: HashMap<String, Vec<FuncId>>,
-    /// 型 -> (ストアドプロパティ名 -> 基底型名)。受け手が field のとき型解決に使う。
-    fields: HashMap<String, HashMap<String, String>>,
-}
-
-/// 型文字列の基底名（`A?`→A、`[T]`→そのまま=解決不能、`Foo<T>`→Foo）。
-fn base_type_name(s: &str) -> String {
-    let mut s = s.trim().trim_end_matches(['?', '!']).trim();
-    if let Some(i) = s.find('<') {
-        s = s[..i].trim();
-    }
-    s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
+    engine::facts_from_sources(
+        Language::Swift,
+        sources,
+        |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
+        |root, src, r, facts| collect_calls(root, src, r, None, None, facts),
+    )
 }
 
 /// Swift プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
 /// 集約シェイプ判定（`is_aggregation_shape`）は末尾セグメント + `[T]`/`<T>` 照合で
 /// Swift 型文字列をそのまま扱えるので正規化不要。
 pub fn fn_signatures_swift(path: &Path, config: &ResolvedConfig) -> Vec<FnSig> {
-    let mut out = Vec::new();
-    for (f, lang) in parser::collect_source_files(path) {
-        if lang != Language::Swift || config.is_excluded(&f, path) {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&f) else { continue };
-        let Some(tree) = parser::parse_with(&src, Language::Swift) else { continue };
-        walk_fn_sigs(tree.root_node(), &src, &f, None, &mut out);
-    }
-    out
+    engine::fn_signatures(path, config, Language::Swift, |root, src, f, out| {
+        walk_fn_sigs(root, src, f, None, out)
+    })
 }
 
 fn walk_fn_sigs(n: Node, source: &str, path: &Path, self_ty: Option<&str>, out: &mut Vec<FnSig>) {
@@ -219,7 +166,7 @@ fn collect_constructions(n: Node, source: &str, out: &mut Vec<MergeConstruction>
                 if is_pascal_case(&ty) {
                     let mut refs = Vec::new();
                     if let Some(args) = first_child_of_kind(n, "call_suffix") {
-                        collect_base_idents(args, source, &mut refs);
+                        engine::collect_base_idents(&IDENT_KINDS, args, source, &mut refs);
                     }
                     out.push(MergeConstruction { type_name: ty, line: n.start_position().row + 1, refs });
                 }
@@ -230,45 +177,6 @@ fn collect_constructions(n: Node, source: &str, out: &mut Vec<MergeConstruction>
     for child in n.children(&mut cur) {
         collect_constructions(child, source, out);
     }
-}
-
-/// 式木の基底識別子（`a.x` → "a"、`self`）を重複なく集める。引数ラベルと
-/// navigation の末尾（.x）は除く。
-fn collect_base_idents(n: Node, source: &str, out: &mut Vec<String>) {
-    match n.kind() {
-        // 引数ラベル `amount:` と navigation の末尾 `.amount` は参照ではない。降りない。
-        "value_argument_label" | "navigation_suffix" => return,
-        "self_expression" => {
-            if !out.iter().any(|s| s == "self") {
-                out.push("self".to_string());
-            }
-            return;
-        }
-        "simple_identifier" => {
-            let t = text_of(n, source).trim().to_string();
-            if !t.is_empty() && !out.contains(&t) {
-                out.push(t);
-            }
-        }
-        _ => {}
-    }
-    let mut cur = n.walk();
-    for child in n.children(&mut cur) {
-        collect_base_idents(child, source, out);
-    }
-}
-
-fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
-    n.utf8_text(source.as_bytes()).unwrap_or("")
-}
-
-fn first_child_of_kind<'a>(n: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut cur = n.walk();
-    n.children(&mut cur).find(|c| c.kind() == kind)
-}
-
-fn is_pascal_case(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// `class_declaration` の種別トークン（struct/class/enum/extension）。
@@ -337,21 +245,7 @@ fn collect_funcs(
         }
         "function_declaration" => {
             if let Some(bare) = func_name(n, source) {
-                let name = match enclosing {
-                    Some(t) => format!("{t}.{bare}"),
-                    None => bare.clone(),
-                };
-                let id = facts.add_func(name, fpath.to_path_buf(), n.start_position().row + 1);
-                ids.insert(n.id(), id);
-                facts.impls.push(ImplEntry {
-                    trait_method: TraitMethod::new("", bare.clone()),
-                    for_type: enclosing.unwrap_or("").to_string(),
-                    func: id,
-                });
-                match enclosing {
-                    Some(t) => index.type_methods.entry((t.to_string(), bare)).or_default().push(id),
-                    None => index.free_funcs.entry(bare).or_default().push(id),
-                }
+                engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
             }
         }
         _ => {}
@@ -472,19 +366,7 @@ fn resolve_call(
     let mut cur = call.walk();
     let Some(first) = call.children(&mut cur).find(|c| c.is_named()) else { return };
 
-    // 受け手の型を解決するクロージャ。
-    let recv_type = |base: &str| -> Option<String> {
-        if base == "self" {
-            enclosing.map(str::to_string)
-        } else if is_pascal_case(base) {
-            Some(base.to_string())
-        } else {
-            locals
-                .get(base)
-                .cloned()
-                .or_else(|| enclosing.and_then(|t| index.fields.get(t)).and_then(|f| f.get(base)).cloned())
-        }
-    };
+    let recv_type = |base: &str| engine::recv_type(base, enclosing, locals, index);
 
     let resolved: Resolution = match first.kind() {
         "simple_identifier" => {
@@ -495,15 +377,15 @@ fn resolve_call(
             }
             // 値（ローカル/フィールド）なら callAsFunction、そうでなければ関数/メソッド呼び。
             if let Some(t) = recv_type(&name) {
-                lookup_method(index, &t, "callAsFunction")
+                engine::lookup_method(index, &t, "callAsFunction")
             } else {
-                resolve_bare(index, enclosing, &name)
+                engine::resolve_bare(index, enclosing, &name)
             }
         }
         "navigation_expression" => {
             let Some(method) = nav_method(first, source) else { return };
             match nav_base_ident(first, source).and_then(|b| recv_type(&b)) {
-                Some(t) => lookup_method(index, &t, &method),
+                Some(t) => engine::lookup_method(index, &t, &method),
                 None => Resolution::Dynamic(method),
             }
         }
@@ -513,55 +395,14 @@ fn resolve_call(
                 return;
             };
             match recv_type(&base) {
-                Some(t) => lookup_method(index, &t, "callAsFunction"),
+                Some(t) => engine::lookup_method(index, &t, "callAsFunction"),
                 None => Resolution::Dynamic("callAsFunction".to_string()),
             }
         }
         _ => return,
     };
 
-    let Some(c) = caller else { return };
-    match resolved {
-        Resolution::Targets(target_ids) => {
-            for t in target_ids {
-                facts.calls.push(CallSite { caller: c, target: CallTargetKind::Static(t) });
-            }
-        }
-        Resolution::Dynamic(m) => {
-            facts.calls.push(CallSite { caller: c, target: CallTargetKind::Dynamic(TraitMethod::new("", m)) });
-        }
-        Resolution::External => {} // 受け手の型は判ったが index 外＝外部/継承。エッジ無し。
-    }
-}
-
-enum Resolution {
-    /// 型が解決でき、そのメソッドに厳密に結んだ（同名オーバーロードは複数）。
-    Targets(Vec<FuncId>),
-    /// 型未解決 → 同名メソッド全てに繋ぐ過大近似（偽陰性を出さない）。
-    Dynamic(String),
-    /// 受け手の型は具体解決できたが index に無い（外部ライブラリ型/継承）→ エッジ無し。
-    /// Dynamic で全同名に繋ぐより精密（受け手型が判っている以上、他の自型メソッドではない）。
-    External,
-}
-
-fn lookup_method(index: &Index, ty: &str, method: &str) -> Resolution {
-    match index.type_methods.get(&(ty.to_string(), method.to_string())) {
-        Some(ids) => Resolution::Targets(ids.clone()),
-        None => Resolution::External,
-    }
-}
-
-/// 受け手なしの呼び出し: 内包型のメソッド（暗黙 self）→ 自由関数 → Dynamic。
-fn resolve_bare(index: &Index, enclosing: Option<&str>, name: &str) -> Resolution {
-    if let Some(t) = enclosing {
-        if let Some(ids) = index.type_methods.get(&(t.to_string(), name.to_string())) {
-            return Resolution::Targets(ids.clone());
-        }
-    }
-    if let Some(ids) = index.free_funcs.get(name) {
-        return Resolution::Targets(ids.clone());
-    }
-    Resolution::Dynamic(name.to_string())
+    engine::push_resolution(resolved, caller, facts);
 }
 
 /// navigation_expression の受け手基底識別子（self / 変数 / `x!`）。チェーンや式は None。
@@ -607,11 +448,6 @@ fn prop_type(n: Node, source: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn last_child_of_kind<'a>(n: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    let mut cur = n.walk();
-    n.children(&mut cur).filter(|c| c.kind() == kind).last()
 }
 
 #[cfg(test)]
