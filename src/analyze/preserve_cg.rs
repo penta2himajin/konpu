@@ -321,6 +321,7 @@ mod tests {
             }],
             exclude: Vec::new(),
             callgraph_hub_threshold: None,
+            infer: false,
         }
     }
 

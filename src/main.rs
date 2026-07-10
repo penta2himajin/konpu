@@ -24,6 +24,9 @@ enum Commands {
         /// only effective when built with --features call-graph).
         #[arg(long)]
         call_graph: bool,
+        /// Infer algebraic structures from impls even without annotations.
+        #[arg(long)]
+        infer: bool,
     },
     /// Generate law-test skeletons for annotated declarations
     Scaffold {
@@ -127,7 +130,7 @@ fn run_call_graph_preserve(
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { path, config, baseline, call_graph } => {
+        Commands::Check { path, config, baseline, call_graph, infer } => {
             use konpu::analyze::baseline;
             use konpu::analyze::template;
             use konpu::domain::konpu::Severity;
@@ -135,7 +138,8 @@ fn main() {
             let config_path = config
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("konpu.toml"));
-            let resolved = template::load(&config_path);
+            let mut resolved = template::load(&config_path);
+            resolved.infer = resolved.infer || infer;
             let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
             let baseline_path = baseline
                 .map(std::path::PathBuf::from)

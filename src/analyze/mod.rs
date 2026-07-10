@@ -2,6 +2,7 @@ pub mod baseline;
 pub mod call_graph;
 pub mod check;
 pub mod extract;
+pub mod infer;
 pub mod parser;
 #[cfg(feature = "call-graph")]
 pub mod preserve_cg;
@@ -85,7 +86,7 @@ fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> Analysis
         .into_iter()
         .filter(|f| !config.is_excluded(f, path))
         .collect();
-    let ex = extract_all(&files);
+    let ex = extract_all(&files, config.infer);
     let diagnostics = run_diagnostics(&ex, config);
     let expectation_mismatches = layer_mismatches(&ex.decls, config);
     let boundary_violations = boundary_checks(&ex, config);
@@ -102,8 +103,8 @@ fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> Analysis
 }
 
 /// フェーズ1: 全ファイルから宣言・impl・law test・ignore・use を抽出し、
-/// 各宣言の伝播度を算出する。
-fn extract_all(files: &[PathBuf]) -> Extracted {
+/// 各宣言の伝播度を算出する。`infer` が真ならアノテーション無しの型も推論して足す。
+fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
     let mut ex = Extracted {
         decls: Vec::new(),
         impls: Vec::new(),
@@ -112,6 +113,8 @@ fn extract_all(files: &[PathBuf]) -> Extracted {
         uses: Vec::new(),
     };
     let mut type_infos = Vec::new();
+    let mut type_sites: std::collections::HashMap<String, (PathBuf, usize)> =
+        std::collections::HashMap::new();
     for file in files {
         let Some((_, tree)) = parser::parse_file(file) else {
             continue;
@@ -126,6 +129,17 @@ fn extract_all(files: &[PathBuf]) -> Extracted {
         ex.ignores.extend(extract::extract_ignores(root, &source, file));
         type_infos.extend(propagation::extract_type_infos(root, &source));
         ex.uses.extend(extract::extract_use_statements(root, &source, file));
+        if infer {
+            for (name, path, line) in extract::extract_type_sites(root, &source, file) {
+                type_sites.entry(name).or_insert((path, line));
+            }
+        }
+    }
+    if infer {
+        let annotated: std::collections::HashSet<String> =
+            ex.decls.iter().map(|d| d.type_name.clone()).collect();
+        ex.decls
+            .extend(infer::infer_declarations(&ex.impls, &type_sites, &annotated));
     }
     for decl in &mut ex.decls {
         let (size, _count) = propagation::compute_propagation(&decl.type_name, &type_infos);

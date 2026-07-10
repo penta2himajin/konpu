@@ -510,6 +510,28 @@ pub fn extract_impls(root: Node, source: &str) -> Vec<ImplInfo> {
     out
 }
 
+/// struct / enum の宣言サイト (型名, パス, 行) を集める。推論の診断アンカー用。
+pub fn extract_type_sites(root: Node, source: &str, path: &Path) -> Vec<(String, PathBuf, usize)> {
+    let mut out = Vec::new();
+    recurse_type_sites(root, source, path, &mut out);
+    out
+}
+
+fn recurse_type_sites(node: Node, source: &str, path: &Path, out: &mut Vec<(String, PathBuf, usize)>) {
+    if matches!(node.kind(), "struct_item" | "enum_item") {
+        if let Some(name) = node.child_by_field_name("name") {
+            let n = text_of(name, source);
+            if !n.is_empty() {
+                out.push((n, path.to_path_buf(), node.start_position().row + 1));
+            }
+        }
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        recurse_type_sites(child, source, path, out);
+    }
+}
+
 fn recurse_impls(node: Node, source: &str, out: &mut Vec<ImplInfo>) {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {

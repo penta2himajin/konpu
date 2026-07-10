@@ -120,6 +120,9 @@ pub struct Config {
     pub exclude: Vec<String>,
     #[serde(default)]
     pub callgraph: Callgraph,
+    /// アノテーション無しでも impl から代数構造を推論する。CLI `--infer` でも有効化。
+    #[serde(default)]
+    pub infer: bool,
 }
 
 /// `[callgraph]` セクション。`konpu callgraph` の閾値調整。
@@ -164,6 +167,8 @@ pub struct ResolvedConfig {
     pub exclude: Vec<String>,
     /// `konpu callgraph` のハブ次数下限（未設定なら CLI 既定）。
     pub callgraph_hub_threshold: Option<usize>,
+    /// アノテーション無し推論を有効にするか。
+    pub infer: bool,
 }
 
 impl ResolvedConfig {
@@ -174,6 +179,7 @@ impl ResolvedConfig {
             boundaries: Vec::new(),
             exclude: Vec::new(),
             callgraph_hub_threshold: None,
+            infer: false,
         }
     }
 
@@ -265,6 +271,7 @@ pub fn parse(text: &str) -> ResolvedConfig {
         boundaries,
         exclude: config.exclude,
         callgraph_hub_threshold: config.callgraph.hub_threshold,
+        infer: config.infer,
     }
 }
 
