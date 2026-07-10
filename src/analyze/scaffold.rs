@@ -41,6 +41,8 @@ fn law_pairs(file: &Path, lang: Language) -> Option<(Vec<(String, Law)>, usize)>
     let decls = match lang {
         Language::Rust => crate::analyze::extract::extract_declarations(root, &source, file),
         Language::Swift => crate::analyze::extract_swift::extract_declarations(root, &source, file),
+        // Kotlin のコメント注釈抽出は未実装（推論スライス段階）→ scaffold 対象外。
+        Language::Kotlin => Vec::new(),
     };
     if decls.is_empty() {
         return None;
@@ -60,6 +62,8 @@ fn scaffold_one(file: &Path, lang: Language) -> Option<ScaffoldedFile> {
     let (contents, path) = match lang {
         Language::Rust => (render_rust(file, &pairs), out_path(file, "_law_tests.rs")),
         Language::Swift => (render_swift(file, &pairs), out_path(file, "LawTests.swift")),
+        // Kotlin は現状 decls が空でここに到達しない（law_pairs が None）。網羅のためのみ。
+        Language::Kotlin => (String::new(), out_path(file, "LawTests.kt")),
     };
     Some(ScaffoldedFile { path, contents, decl_count, test_count })
 }

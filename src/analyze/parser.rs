@@ -7,6 +7,7 @@ use tree_sitter::{Parser, Tree};
 pub enum Language {
     Rust,
     Swift,
+    Kotlin,
 }
 
 impl Language {
@@ -15,6 +16,7 @@ impl Language {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Some(Language::Rust),
             Some("swift") => Some(Language::Swift),
+            Some("kt") | Some("kts") => Some(Language::Kotlin),
             _ => None,
         }
     }
@@ -23,6 +25,7 @@ impl Language {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         }
     }
 }

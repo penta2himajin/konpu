@@ -2,6 +2,7 @@ pub mod baseline;
 pub mod call_graph;
 pub mod check;
 pub mod extract;
+pub mod extract_kotlin;
 pub mod extract_swift;
 #[cfg(feature = "call-graph")]
 pub mod call_graph_swift;
@@ -186,6 +187,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         let e = match lang {
             parser::Language::Rust => extract::extract_all_file(root, &source, file),
             parser::Language::Swift => extract_swift::extract_all_file(root, &source, file),
+            parser::Language::Kotlin => extract_kotlin::extract_all_file(root, &source, file),
         };
         ex.decls.extend(e.decls);
         ex.impls.extend(e.impls);
@@ -302,9 +304,12 @@ fn boundary_checks(
             // 逆方向参照の照合方式を言語で切り替える。
             // Rust: `use` パスを `from` パスキーで照合。
             // Swift: `import <Module>` を `from_modules`（モジュール名リスト）で照合。
+            // Swift/Kotlin は import 対象（module / package）を `from_modules` で照合。
             let is_reverse = match u.language {
                 parser::Language::Rust => !from_key.is_empty() && imported_matches(&u.imported_path, &from_key),
-                parser::Language::Swift => b.from_modules.iter().any(|m| m == &u.imported_path),
+                parser::Language::Swift | parser::Language::Kotlin => {
+                    b.from_modules.iter().any(|m| m == &u.imported_path)
+                }
             };
             if is_reverse {
                 boundary_violations.push(template::BoundaryViolation {
