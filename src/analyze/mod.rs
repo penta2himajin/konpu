@@ -4,6 +4,7 @@ pub mod check;
 pub mod directive;
 pub mod extract;
 pub mod infer;
+pub mod module_graph;
 pub mod parser;
 #[cfg(feature = "call-graph")]
 pub mod preserve_cg;

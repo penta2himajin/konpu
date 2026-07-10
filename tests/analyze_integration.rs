@@ -349,3 +349,21 @@ fn ts_reverse_import_boundary_via_from_modules() {
     std::fs::remove_dir(&domain).ok();
     std::fs::remove_dir(&dir).ok();
 }
+#[test]
+fn module_graph_detects_cross_directory_cycle() {
+    use konpu::analyze::module_graph;
+    use konpu::analyze::template::ResolvedConfig;
+    // a/ と b/ が相互に import → ディレクトリ循環。
+    let dir = std::env::temp_dir().join("konpu_modgraph_test");
+    let a = dir.join("a");
+    let b = dir.join("b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(a.join("x.ts"), "import { y } from \"../b/y\";\nexport const x = 1;\n").unwrap();
+    std::fs::write(b.join("y.ts"), "import { x } from \"../a/x\";\nexport const y = 2;\n").unwrap();
+    let g = module_graph::build(&dir, &ResolvedConfig::empty());
+    let cycles = g.cycles();
+    assert_eq!(cycles.len(), 1, "expected one a<->b cycle, modules={:?}", g.modules);
+    assert_eq!(cycles[0].len(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -125,6 +125,15 @@ enum Commands {
         #[arg(long)]
         infer: bool,
     },
+    /// Build the module (directory) dependency graph and report cycles + coupling hubs
+    Modulegraph {
+        /// Project directory to analyze
+        path: String,
+        /// Report modules whose fan-in or fan-out is at least this. Overrides
+        /// [callgraph] hub_threshold in konpu.toml; both fall back to 8.
+        #[arg(long)]
+        hub_threshold: Option<usize>,
+    },
     /// Build the call graph (via rust-analyzer/SCIP) and report cycles + hubs
     #[cfg(feature = "call-graph")]
     Callgraph {
@@ -206,6 +215,15 @@ fn run_call_graph_preserve(
 ) -> bool {
     eprintln!("konpu check --call-graph: rebuild konpu with --features call-graph");
     false
+}
+
+/// モジュール（ディレクトリ）ラベル。root 直下は "(root)" と表示する。
+fn dir_label(d: &str) -> &str {
+    if d.is_empty() {
+        "(root)"
+    } else {
+        d
+    }
 }
 
 /// 設定ファイルのパスを決める。`--config` 明示が最優先。無ければ、ディレクトリ解析
@@ -474,6 +492,41 @@ fn main() {
                     c.passing,
                     c.failing,
                     c.missing
+                );
+            }
+        }
+        Commands::Modulegraph { path, hub_threshold } => {
+            use konpu::analyze::module_graph;
+            let p = std::path::Path::new(&path);
+            let cfg = konpu::analyze::template::load(&p.join("konpu.toml"));
+            let g = module_graph::build(p, &cfg);
+            let threshold = hub_threshold.or(cfg.callgraph_hub_threshold).unwrap_or(8);
+            let edge_count: usize = g.edges.iter().map(|e| e.len()).sum();
+            println!("== konpu module deps ==");
+            println!("modules: {}", g.modules.len());
+            println!("dependency edges: {edge_count}");
+            let cycles = g.cycles();
+            println!("circular dependencies (module import cycles): {}", cycles.len());
+            for scc in &cycles {
+                let names: Vec<&str> = scc.iter().map(|&i| dir_label(&g.modules[i])).collect();
+                println!("  {}", names.join(" ⇄ "));
+            }
+            let fan_out = g.fan_out_hubs(threshold);
+            println!("fan-out hubs (depends on >= {threshold} — wide blast radius): {}", fan_out.len());
+            for i in &fan_out {
+                println!("  {} (out={}, in={})", dir_label(&g.modules[*i]), g.out_degree(*i), g.in_degree(*i));
+            }
+            let fan_in = g.fan_in_hubs(threshold);
+            println!("fan-in hubs (depended on >= {threshold} — change chokepoints): {}", fan_in.len());
+            for i in &fan_in {
+                println!("  {} (out={}, in={})", dir_label(&g.modules[*i]), g.out_degree(*i), g.in_degree(*i));
+            }
+            if !g.unresolved.is_empty() {
+                let note: Vec<String> =
+                    g.unresolved.iter().map(|(l, n)| format!("{l}: {n} file(s)")).collect();
+                println!(
+                    "note: module-name imports not yet resolved ({}) — Rust/TS only for now",
+                    note.join(", ")
                 );
             }
         }
