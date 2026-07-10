@@ -188,11 +188,20 @@ impl ResolvedConfig {
         if self.exclude.is_empty() {
             return false;
         }
-        let rel = file.strip_prefix(root).unwrap_or(file);
-        let rel = rel.to_string_lossy();
-        let rel = rel.trim_start_matches("./");
-        self.exclude.iter().any(|p| glob_match(p, rel))
+        let rel = rel_to_root(file, root);
+        self.exclude.iter().any(|p| glob_match(p, &rel))
     }
+}
+
+/// ファイルパスを解析ルート起点の相対文字列にする。glob 照合の基準を CWD ではなく
+/// 解析ルートに揃えるための共通ヘルパ（外部プロジェクトを別 CWD から解析しても合う）。
+pub fn rel_to_root(file_path: &Path, root: &Path) -> String {
+    file_path
+        .strip_prefix(root)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .trim_start_matches("./")
+        .to_string()
 }
 
 /// `konpu.toml` を読み込んで解決済み設定を返す。ファイル不在なら空設定。
@@ -362,15 +371,13 @@ fn comp_match(pat: &str, comp: &str) -> bool {
     dp[m][n]
 }
 
-/// 指定ファイルパスにマッチする最初の層を返す。
+/// 指定ファイルパス（解析ルート `root` 起点で相対化）にマッチする最初の層を返す。
 pub fn match_layer<'a>(
     config: &'a ResolvedConfig,
     file_path: &Path,
+    root: &Path,
 ) -> Option<&'a ResolvedLayer> {
-    let rel = file_path
-        .strip_prefix(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .unwrap_or(file_path);
-    let s = rel.to_string_lossy();
+    let s = rel_to_root(file_path, root);
     config.layers.iter().find(|l| {
         !l.path_pattern.is_empty() && glob_match(&l.path_pattern, &s)
     })
@@ -548,13 +555,14 @@ mod tests {
             "[layers.domain]\npath = \"src/domain/**\"\nmax_propagation = 4\n\
              [layers.infra]\npath = \"src/infra/**\"\nmax_propagation = -1\n",
         );
-        let l = match_layer(&cfg, Path::new("src/domain/konpu.rs"));
+        let root = Path::new("");
+        let l = match_layer(&cfg, Path::new("src/domain/konpu.rs"), root);
         assert!(l.is_some());
         assert_eq!(l.unwrap().name, "domain");
-        let l = match_layer(&cfg, Path::new("src/infra/db.rs"));
+        let l = match_layer(&cfg, Path::new("src/infra/db.rs"), root);
         assert!(l.is_some());
         assert_eq!(l.unwrap().name, "infra");
-        let l = match_layer(&cfg, Path::new("src/lib.rs"));
+        let l = match_layer(&cfg, Path::new("src/lib.rs"), root);
         assert!(l.is_none());
     }
 }

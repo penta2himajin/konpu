@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::konpu::{
     AlgebraicDeclaration, AlgebraicStructure, Diagnostic, DiagnosticRule, Law, OperationName,
@@ -227,11 +227,12 @@ pub fn check_law_tests(
 pub fn check_propagation(
     decl: &AnalyzedDeclaration,
     config: &ResolvedConfig,
+    root: &Path,
 ) -> Vec<Diagnostic> {
     let Some(size) = &decl.propagation else {
         return Vec::new();
     };
-    let layer = template::match_layer(config, &decl.path);
+    let layer = template::match_layer(config, &decl.path, root);
     let threshold = template::threshold(config, layer);
     let declaration = AlgebraicDeclaration {
         targetStructure: decl.target_structure.clone(),

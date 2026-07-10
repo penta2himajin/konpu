@@ -86,10 +86,17 @@ fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> Analysis
         .into_iter()
         .filter(|f| !config.is_excluded(f, path))
         .collect();
+    // glob 照合の基準。ディレクトリ解析ならそのディレクトリ（外部プロジェクトを
+    // 別 CWD から解析しても合う）、単一ファイル解析ならプロジェクトルート＝CWD 想定。
+    let root: PathBuf = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
     let ex = extract_all(&files, config.infer);
-    let diagnostics = run_diagnostics(&ex, config);
-    let expectation_mismatches = layer_mismatches(&ex.decls, config);
-    let boundary_violations = boundary_checks(&ex, config);
+    let diagnostics = run_diagnostics(&ex, config, &root);
+    let expectation_mismatches = layer_mismatches(&ex.decls, config, &root);
+    let boundary_violations = boundary_checks(&ex, config, &root);
     AnalysisResult {
         diagnostics,
         ignores: ex.ignores,
@@ -149,13 +156,13 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
 }
 
 /// フェーズ2: 宣言・伝播・law test の診断を集めてパス/行でソートする。
-fn run_diagnostics(ex: &Extracted, config: &template::ResolvedConfig) -> Vec<AnalyzedDiagnostic> {
+fn run_diagnostics(ex: &Extracted, config: &template::ResolvedConfig, root: &Path) -> Vec<AnalyzedDiagnostic> {
     let mut out: Vec<AnalyzedDiagnostic> = Vec::new();
     for decl in &ex.decls {
         for diag in check::check_declaration(decl, &ex.impls) {
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
-        for diag in check::check_propagation(decl, config) {
+        for diag in check::check_propagation(decl, config, root) {
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
     }
@@ -170,10 +177,11 @@ fn run_diagnostics(ex: &Extracted, config: &template::ResolvedConfig) -> Vec<Ana
 fn layer_mismatches(
     decls: &[extract::AnalyzedDeclaration],
     config: &template::ResolvedConfig,
+    root: &Path,
 ) -> Vec<template::LayerExpectationMismatch> {
     let mut mismatches = Vec::new();
     for decl in decls {
-        let Some(layer) = template::match_layer(config, &decl.path) else {
+        let Some(layer) = template::match_layer(config, &decl.path, root) else {
             continue;
         };
         if !layer.expect_structures.is_empty()
@@ -218,13 +226,14 @@ fn layer_mismatches(
 fn boundary_checks(
     ex: &Extracted,
     config: &template::ResolvedConfig,
+    root: &Path,
 ) -> Vec<template::BoundaryViolation> {
     let mut boundary_violations = Vec::new();
     for b in &config.boundaries {
         let from_key = from_pattern_key(&b.from_pattern);
         for u in &ex.uses {
             let caller_path = u.path.clone();
-            if !glob_match_path(&b.to_pattern, &caller_path) || from_key.is_empty() {
+            if !glob_match_path(&b.to_pattern, &caller_path, root) || from_key.is_empty() {
                 continue;
             }
             if imported_matches(&u.imported_path, &from_key) {
@@ -242,7 +251,7 @@ fn boundary_checks(
                 });
             }
         }
-        boundary_violations.extend(preserve_nominal(b, &ex.decls));
+        boundary_violations.extend(preserve_nominal(b, &ex.decls, root));
     }
     boundary_violations
 }
@@ -253,6 +262,7 @@ fn boundary_checks(
 fn preserve_nominal(
     b: &template::ResolvedBoundary,
     decls: &[extract::AnalyzedDeclaration],
+    root: &Path,
 ) -> Vec<template::BoundaryViolation> {
     if b.preserve.is_empty() {
         return Vec::new();
@@ -260,7 +270,8 @@ fn preserve_nominal(
     let from_decls: Vec<&extract::AnalyzedDeclaration> = decls
         .iter()
         .filter(|d| {
-            glob_match_path(&b.from_pattern, &d.path) && b.preserve.contains(&d.target_structure)
+            glob_match_path(&b.from_pattern, &d.path, root)
+                && b.preserve.contains(&d.target_structure)
         })
         .collect();
     if from_decls.is_empty() {
@@ -268,7 +279,7 @@ fn preserve_nominal(
     }
     let to_decls: Vec<&extract::AnalyzedDeclaration> = decls
         .iter()
-        .filter(|d| glob_match_path(&b.to_pattern, &d.path))
+        .filter(|d| glob_match_path(&b.to_pattern, &d.path, root))
         .collect();
     let mut out = Vec::new();
     for fd in &from_decls {
@@ -297,12 +308,8 @@ fn preserve_nominal(
     out
 }
 
-fn glob_match_path(pattern: &str, file_path: &Path) -> bool {
-    let rel = file_path
-        .strip_prefix(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .unwrap_or(file_path);
-    let s = rel.to_string_lossy();
-    template::glob_match(pattern, &s)
+fn glob_match_path(pattern: &str, file_path: &Path, root: &Path) -> bool {
+    template::glob_match(pattern, &template::rel_to_root(file_path, root))
 }
 
 fn from_pattern_key(from_pattern: &str) -> String {

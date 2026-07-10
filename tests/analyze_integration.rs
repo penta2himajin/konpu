@@ -274,11 +274,10 @@ fn boundary_preserve_violation_when_to_loses_monoid_rank() {
         &to_path,
         "#[konpu::semigroup(op = \"op\")]\npub struct Entity;\nimpl Entity { pub fn op(self, _o: Self) -> Self { Self } }\n",
     ).unwrap();
-    let cfg = template::parse(&format!(
-        "[boundaries.d]\nfrom = \"{}/entity.rs\"\nto = \"{}/repo.rs\"\npreserve = [\"monoid\"]\n",
-        dir.display(),
-        dir.display()
-    ));
+    // Patterns are relative to the analyzed directory root (glob root = `dir`).
+    let cfg = template::parse(
+        "[boundaries.d]\nfrom = \"entity.rs\"\nto = \"repo.rs\"\npreserve = [\"monoid\"]\n",
+    );
     let result = analyze_full(&dir, &cfg);
     assert!(
         result
