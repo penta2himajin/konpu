@@ -318,3 +318,34 @@ fn swift_reverse_import_boundary_via_from_modules() {
     std::fs::remove_dir(&domain).ok();
     std::fs::remove_dir(&dir).ok();
 }
+
+#[test]
+fn ts_reverse_import_boundary_via_from_modules() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    // A `to`-layer TS file importing a `from`-layer module specifier is a
+    // reverse-dependency violation (same from_modules path as Swift/Kotlin).
+    let dir = std::env::temp_dir().join("konpu_ts_boundary_test");
+    let domain = dir.join("domain");
+    std::fs::create_dir_all(&domain).unwrap();
+    let money = domain.join("money.ts");
+    std::fs::write(
+        &money,
+        "import { Db } from \"../infra/db\";\nimport { z } from \"zod\";\nexport class Money { constructor(readonly amount: number) {} }\n",
+    )
+    .unwrap();
+    let cfg = template::parse(
+        "[boundaries.no_infra_in_domain]\nfrom = \"infra/**\"\nfrom_modules = [\"../infra/db\"]\nto = \"domain/**\"\n",
+    );
+    let result = analyze_full(&dir, &cfg);
+    assert!(
+        result.boundary_violations.iter().any(|v| v.imported_path == "../infra/db"),
+        "expected a reverse-import violation for ../infra/db, got: {:?}",
+        result.boundary_violations
+    );
+    // `zod` is not a `from` module → must not violate.
+    assert!(!result.boundary_violations.iter().any(|v| v.imported_path == "zod"));
+    std::fs::remove_file(&money).ok();
+    std::fs::remove_dir(&domain).ok();
+    std::fs::remove_dir(&dir).ok();
+}

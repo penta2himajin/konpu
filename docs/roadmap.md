@@ -338,7 +338,7 @@ konpu check: 法則テストの通過を確認
 - [x] ベースラインモード（`konpu baseline`）（`src/analyze/baseline.rs`、CLI `Baseline`サブコマンド）
 
 #### 1-D：補助機能
-- [x] `konpu scaffold` — 法則テストのスケルトン生成（`src/analyze/scaffold.rs`。Rust/proptest形式に加えSwift(XCTest)/Kotlin(kotlin.test)にも対応）
+- [x] `konpu scaffold` — 法則テストのスケルトン生成（`src/analyze/scaffold.rs`。Rust/proptest形式に加えSwift(XCTest)/Kotlin(kotlin.test)/TS(jest/vitest)にも対応）
 - [x] `konpu report` — コードベース全体の代数的複雑度サマリー出力（充足ギャップ、ignore理由別集計、層別期待構造mismatch、境界違反まで出力）
 
 **完了基準：** `konpu.toml`にDDDプリセットを設定し、ドメイン層でモノイド則のテストが欠落している型がワーニングとして報告されること。文脈伝播度の超過が検出されること。→ 達成（プリセットは`ddd`のみ実装）。
@@ -378,7 +378,14 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
   call graph（layer 2b: 循環/ハブ + preserve B/C、`call_graph_kotlin` に精密解決移植）。
   **Kotlin は Swift と完全同等**（layer-3 + layer-2b）。CLI は `cg_ts_language` で
   Rust/SCIP・Swift・Kotlin を 3-way 判定。
-- [ ] TypeScript（4言語目以降）
+- [x] TypeScript（4言語目、tree-sitter-typescript）: layer-3 フルパリティ。
+  推論（class/abstract class/interface/enum、演算子オーバーロード無しなので名前付き
+  `combine`/`merge`、`static zero()` / `static readonly zero: T`→単位元＝Kotlin companion 相当）、
+  `// konpu:` コメント注釈（共有 `directive`、`export class` は `export_statement` を剥がして到達）、
+  law + `test("name")`/`it(...)` テスト名抽出、compliance、propagation（`T[]`/`Array`/`Set`/`Map` 正規化）、
+  scaffold（`.laws.test.ts`、jest/vitest 形式 + `// konpu: law`）、
+  逆import境界（import 指定子を `from_modules` 接頭辞照合）。`src/analyze/extract_ts.rs` のみ新規、
+  解析エンジンは無改変。**call graph（layer 2b）は未対応**（共有 CG エンジン抽出後の後続）。
 
 #### 2-C：oxidtr正式連携
 - [ ] oxidtrが生成するコードへのKonpuアノテーション自動付与

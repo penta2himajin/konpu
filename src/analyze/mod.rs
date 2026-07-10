@@ -5,6 +5,7 @@ pub mod directive;
 pub mod extract;
 pub mod extract_kotlin;
 pub mod extract_swift;
+pub mod extract_ts;
 #[cfg(feature = "call-graph")]
 pub mod call_graph_swift;
 #[cfg(feature = "call-graph")]
@@ -191,6 +192,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
             parser::Language::Rust => extract::extract_all_file(root, &source, file),
             parser::Language::Swift => extract_swift::extract_all_file(root, &source, file),
             parser::Language::Kotlin => extract_kotlin::extract_all_file(root, &source, file),
+            parser::Language::Ts => extract_ts::extract_all_file(root, &source, file),
         };
         ex.decls.extend(e.decls);
         ex.impls.extend(e.impls);
@@ -311,7 +313,8 @@ fn boundary_checks(
             // 完全一致、Kotlin は完全修飾 import のパッケージ接頭辞一致（`m` または `m.`）。
             let is_reverse = match u.language {
                 parser::Language::Rust => !from_key.is_empty() && imported_matches(&u.imported_path, &from_key),
-                parser::Language::Swift | parser::Language::Kotlin => b
+                // TS も import 指定子（モジュール名/相対パス）を from_modules で照合。
+                parser::Language::Swift | parser::Language::Kotlin | parser::Language::Ts => b
                     .from_modules
                     .iter()
                     .any(|m| &u.imported_path == m || u.imported_path.starts_with(&format!("{m}."))),

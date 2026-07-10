@@ -8,6 +8,7 @@ pub enum Language {
     Rust,
     Swift,
     Kotlin,
+    Ts,
 }
 
 impl Language {
@@ -17,6 +18,7 @@ impl Language {
             Some("rs") => Some(Language::Rust),
             Some("swift") => Some(Language::Swift),
             Some("kt") | Some("kts") => Some(Language::Kotlin),
+            Some("ts") | Some("tsx") | Some("mts") | Some("cts") => Some(Language::Ts),
             _ => None,
         }
     }
@@ -26,6 +28,7 @@ impl Language {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Swift => tree_sitter_swift::LANGUAGE.into(),
             Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            Language::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         }
     }
 }
