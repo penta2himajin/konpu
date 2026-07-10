@@ -1,5 +1,52 @@
 use clap::{Parser, Subcommand};
 
+/// `konpu init` が書き出す既定 konpu.toml。konpu の挙動制御はすべてここに寄せる
+/// （exclude / callgraph / layers / boundaries）＝設定を単一のソースにする。
+const DEFAULT_KONPU_TOML: &str = r#"# konpu.toml — konpu の挙動を宣言する単一の設定ソース。
+# `konpu init` が生成。不要な行は消してよい。
+
+# 解析・コールグラフ対象から除外する glob（プロジェクトルート相対）。
+# テスト/フィクスチャ/依存/ビルド成果物を外し、診断とハブ集計を実コードに絞る。
+# glob: `*`=セグメント内任意、`**`=任意階層。全言語共通（パス照合なので言語非依存）。
+exclude = [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/fixtures/**",
+    # テスト（言語横断の慣習）
+    "**/tests/**",
+    "**/__tests__/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/*Test.kt",
+    "**/*Tests.swift",
+]
+
+# アノテーション無しでも impl/クラスから代数構造を推論する（CLI --infer と同等）。
+infer = false
+
+[callgraph]
+# fan-in / fan-out がこの数以上の関数を「ハブ」(分解候補/変更チョークポイント) として報告。
+hub_threshold = 8
+
+# --- 以下は任意。コメントを外して使う ---
+
+# アーキテクチャのプリセット層（現状 `ddd` のみ実装。hexagonal/clean は空スタブ）。
+# preset = "ddd"
+
+# 層ごとの期待代数構造・伝播度上限:
+# [layers.domain]
+# path = "src/domain/**"
+# expect = ["Monoid", "Group"]
+# max_propagation = 100
+
+# 層間の依存方向・保存則（逆方向 import を違反として検出）:
+# [boundaries.no_infra_in_domain]
+# from = "src/infra/**"
+# to = "src/domain/**"
+# from_modules = ["InfraKit"]   # Swift/Kotlin/TS は import 指定子で照合
+"#;
+
 #[derive(Parser)]
 #[command(name = "konpu", version, about = "Algebraic complexity linter")]
 struct Cli {
@@ -31,6 +78,15 @@ enum Commands {
         /// `failures:` block are reported as FailingLawTest (Error).
         #[arg(long)]
         test_results: Option<String>,
+    },
+    /// Write a default konpu.toml (behavior config: exclude, callgraph, layers…)
+    Init {
+        /// Directory to write konpu.toml into (default: current dir)
+        #[arg(default_value = ".")]
+        path: String,
+        /// Overwrite an existing konpu.toml
+        #[arg(long)]
+        force: bool,
     },
     /// Generate law-test skeletons for annotated declarations
     Scaffold {
@@ -244,6 +300,23 @@ fn main() {
                 has_error |= run_call_graph_preserve(&p, &resolved);
             }
             std::process::exit(if has_error { 1 } else { 0 });
+        }
+        Commands::Init { path, force } => {
+            let target = std::path::Path::new(&path).join("konpu.toml");
+            if target.exists() && !force {
+                eprintln!(
+                    "konpu init: {} already exists (use --force to overwrite)",
+                    target.display()
+                );
+                std::process::exit(1);
+            }
+            match std::fs::write(&target, DEFAULT_KONPU_TOML) {
+                Ok(()) => println!("konpu init: wrote {}", target.display()),
+                Err(e) => {
+                    eprintln!("konpu init: failed to write {}: {e}", target.display());
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Scaffold { path, config, write } => {
             use konpu::analyze::scaffold;
@@ -532,5 +605,24 @@ fn main() {
                 print_hub(f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_KONPU_TOML;
+
+    /// 生成する既定 konpu.toml は有効な TOML で、既定 exclude（テスト等）を含む。
+    /// TOML のタイポは実行時にしか出ないので、ここで固定する。
+    #[test]
+    fn default_config_parses_and_excludes_tests() {
+        let cfg = konpu::analyze::template::parse(DEFAULT_KONPU_TOML);
+        assert!(cfg.exclude.iter().any(|p| p == "**/*.test.*"));
+        assert!(cfg.exclude.iter().any(|p| p == "**/node_modules/**"));
+        assert_eq!(cfg.callgraph_hub_threshold, Some(8));
+        // 実ファイルパスが除外判定に乗ること（glob 照合の健全性）。
+        let root = std::path::Path::new("/proj");
+        assert!(cfg.is_excluded(std::path::Path::new("/proj/src/money.test.ts"), root));
+        assert!(!cfg.is_excluded(std::path::Path::new("/proj/src/money.ts"), root));
     }
 }
