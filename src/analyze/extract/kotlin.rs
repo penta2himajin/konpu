@@ -39,6 +39,23 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze
     }
 }
 
+/// `package a.b.c` ヘッダのパッケージ名。モジュール依存グラフの package→dir 索引用。
+/// wildcard `import a.b.*` の `*` は qualified_identifier の外なので含まれない。
+pub fn extract_package(root: Node, source: &str) -> Option<String> {
+    let mut found = None;
+    recurse(root, &mut |n| {
+        if n.kind() == "package_header" && found.is_none() {
+            if let Some(q) = first_child_of_kind(n, "qualified_identifier") {
+                let p = text_of(q, source).trim().to_string();
+                if !p.is_empty() {
+                    found = Some(p);
+                }
+            }
+        }
+    });
+    found
+}
+
 /// `import a.b.C` を UseStatement として集める。imported_path = 完全修飾名。
 /// 境界検査は Kotlin import を `from_modules`（パッケージ接頭辞）と前方一致で照合。
 pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {

@@ -521,14 +521,6 @@ fn main() {
             for i in &fan_in {
                 println!("  {} (out={}, in={})", dir_label(&g.modules[*i]), g.out_degree(*i), g.in_degree(*i));
             }
-            if !g.unresolved.is_empty() {
-                let note: Vec<String> =
-                    g.unresolved.iter().map(|(l, n)| format!("{l}: {n} file(s)")).collect();
-                println!(
-                    "note: module-name imports not yet resolved ({}) — Rust/TS only for now",
-                    note.join(", ")
-                );
-            }
         }
         #[cfg(feature = "call-graph")]
         Commands::Callgraph { path, scip, precision, hub_threshold } => {

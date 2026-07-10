@@ -280,6 +280,38 @@ pub fn extract_type_sites(root: Node, source: &str, path: &Path) -> Vec<(String,
     out
 }
 
+/// ファイル内で参照される型名。モジュール依存グラフ用（Swift は module 内 import 不要
+/// なので、型参照から dir 間依存を引く）。拾うのは:
+/// - 型位置: `type_identifier`（注釈・継承・ジェネリクス）
+/// - 構築/静的アクセス: `call_expression` / `navigation_expression` の先頭が
+///   大文字始まりの `simple_identifier`（`Money(...)` / `Money.zero`）
+///
+/// 宣言サイトの type_identifier も混ざるが、解決側で自 dir への参照は自己ループとして
+/// 落ちるので実害なし。
+pub fn extract_type_refs(root: Node, source: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    recurse(root, &mut |n| match n.kind() {
+        "type_identifier" => {
+            let t = text_of(n, source);
+            if !t.is_empty() {
+                out.insert(t.to_string());
+            }
+        }
+        "call_expression" | "navigation_expression" => {
+            if let Some(c) = n.child(0) {
+                if c.kind() == "simple_identifier" {
+                    let t = text_of(c, source);
+                    if t.chars().next().is_some_and(|ch| ch.is_uppercase()) {
+                        out.insert(t.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    });
+    out
+}
+
 /// 型ごとの impl 情報。struct/class/enum 本体と extension 本体のメソッド＋静的単位元。
 pub fn extract_impls(root: Node, source: &str) -> Vec<ImplInfo> {
     let mut out = Vec::new();

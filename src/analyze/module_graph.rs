@@ -7,9 +7,14 @@
 //! 粒度はディレクトリ（root 相対）。エッジは「ディレクトリ A のファイルが、ディレクトリ B
 //! のファイルへ import する」。同一ディレクトリ内 import は自己ループになるので落とす。
 //!
-//! MVP は **Rust（crate パス）と TS（相対 import）** を解決する。両者はパスから解決できる。
-//! Swift/Kotlin はモジュール名 import でディレクトリに素直に落ちないので、別途言語別の
-//! 方法で対応予定（現状は未解決＝エッジ化しない。存在ファイル数だけ注記する）。
+//! 言語別の解決方式:
+//! - **Rust**: crate パス（`crate::a::b`）をファイルへサフィックス照合。
+//! - **TS**: 相対 import（`./`/`../`）を importer dir から join。
+//! - **Kotlin**: `package a.b.c` 宣言を索引化し、import の完全修飾名を宣言済み package へ
+//!   最長一致（ディレクトリ慣習に依存せず、宣言が SSoT）。
+//! - **Swift**: module 内は import 文が存在しないため2本立て —
+//!   (1) `import M` → swift ソースを含む basename==M の dir（SwiftPM `Sources/M/` 慣習、一意時のみ）、
+//!   (2) 型参照 → 他 dir に一意宣言された型名の使用をエッジ化（best-effort）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,8 +27,6 @@ use super::template::ResolvedConfig;
 pub struct ModuleGraph {
     pub modules: Vec<String>,
     pub edges: Vec<BTreeSet<usize>>,
-    /// 未解決のまま残った言語別ファイル数（Swift/Kotlin など）。報告用。
-    pub unresolved: BTreeMap<&'static str, usize>,
 }
 
 impl ModuleGraph {
@@ -57,6 +60,21 @@ impl ModuleGraph {
     }
 }
 
+/// 1ファイル分の解析結果（parse は1回で済ませ、索引→エッジ化を後段で行う）。
+struct FileFacts {
+    rel: String,
+    lang: Language,
+    /// import / use 文の指定子。
+    imports: Vec<String>,
+    /// Kotlin: `package a.b.c` 宣言。
+    kt_package: Option<String>,
+    /// Swift: このファイルで宣言される型名。
+    /// Kotlin: import 可能なトップレベル symbol（型 + トップレベル関数）。package と組で FQCN 索引になる。
+    type_decls: Vec<String>,
+    /// Swift: このファイルが参照する型名。
+    swift_refs: BTreeSet<String>,
+}
+
 /// プロジェクトからディレクトリ依存グラフを構築する。`config.exclude` は尊重する。
 pub fn build(path: &Path, config: &ResolvedConfig) -> ModuleGraph {
     let files: Vec<(PathBuf, Language)> = parser::collect_source_files(path)
@@ -71,7 +89,7 @@ pub fn build(path: &Path, config: &ResolvedConfig) -> ModuleGraph {
         .collect();
     let known: BTreeSet<String> = rels.iter().map(|(r, _)| r.clone()).collect();
 
-    // ノード = ソースを含むディレクトリ（解決対象言語 Rust/TS のみ）。
+    // ノード = ソースを含むディレクトリ（全対応言語）。
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     let mut modules: Vec<String> = Vec::new();
     let node = |dir: String, index: &mut BTreeMap<String, usize>, modules: &mut Vec<String>| -> usize {
@@ -83,20 +101,13 @@ pub fn build(path: &Path, config: &ResolvedConfig) -> ModuleGraph {
         modules.push(dir);
         i
     };
-
-    let mut unresolved: BTreeMap<&'static str, usize> = BTreeMap::new();
-    for (rel, lang) in &rels {
-        if !matches!(lang, Language::Rust | Language::Ts) {
-            *unresolved.entry(lang_name(*lang)).or_insert(0) += 1;
-            continue;
-        }
+    for (rel, _) in &rels {
         node(dir_of(rel), &mut index, &mut modules);
     }
 
-    // 各ファイルの import を解決してエッジ化。
-    let mut raw_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // パス1: 各ファイルを一度だけ parse して素材を集める。
+    let mut facts: Vec<FileFacts> = Vec::new();
     for (rel, lang) in &rels {
-        let (Language::Rust | Language::Ts) = lang else { continue };
         let Ok(src) = std::fs::read_to_string(path.join(rel)) else { continue };
         let Some(tree) = parser::parse_with(&src, *lang) else { continue };
         let root = tree.root_node();
@@ -104,22 +115,110 @@ pub fn build(path: &Path, config: &ResolvedConfig) -> ModuleGraph {
         let uses = match lang {
             Language::Rust => extract::rust::extract_use_statements(root, &src, rel_path),
             Language::Ts => extract::ts::extract_use_statements(root, &src, rel_path),
-            _ => continue,
+            Language::Kotlin => extract::kotlin::extract_use_statements(root, &src, rel_path),
+            Language::Swift => extract::swift::extract_use_statements(root, &src, rel_path),
         };
-        let importer_dir = dir_of(rel);
+        let kt_package = matches!(lang, Language::Kotlin)
+            .then(|| extract::kotlin::extract_package(root, &src))
+            .flatten();
+        let (type_decls, swift_refs) = match lang {
+            Language::Swift => {
+                let decls = extract::swift::extract_type_sites(root, &src, rel_path)
+                    .into_iter()
+                    .map(|(name, _, _)| name)
+                    .collect();
+                (decls, extract::swift::extract_type_refs(root, &src))
+            }
+            Language::Kotlin => {
+                let mut decls: Vec<String> = extract::kotlin::extract_type_sites(root, &src, rel_path)
+                    .into_iter()
+                    .map(|(name, _, _)| name)
+                    .collect();
+                // トップレベル関数も import 対象（拡張関数含む）なので symbol 索引に足す。
+                decls.extend(extract::kotlin::extract_free_fns(root, &src).into_iter().map(|m| m.name));
+                (decls, BTreeSet::new())
+            }
+            _ => (Vec::new(), BTreeSet::new()),
+        };
+        facts.push(FileFacts {
+            rel: rel.clone(),
+            lang: *lang,
+            imports: uses.into_iter().map(|u| u.imported_path).collect(),
+            kt_package,
+            type_decls,
+            swift_refs,
+        });
+    }
+
+    // パス2: 言語別索引。
+    // Kotlin: 宣言済み package → その package を宣言する dir 集合。
+    let mut kt_packages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Kotlin: FQCN（package.Type）→ 宣言 dir 集合。同一 package が複数 dir に
+    // 跨る場合（KMP の commonMain/commonTest 等）に型 import を宣言 dir へ絞る。
+    let mut kt_types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Swift: 型名 → 宣言 dir 集合（一意なもののみ参照解決に使う）。
+    let mut swift_decl_dirs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Swift: dir basename → swift ソースを含む dir 集合（import 解決用）。
+    let mut swift_basenames: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for f in &facts {
+        let dir = dir_of(&f.rel);
+        if let Some(p) = &f.kt_package {
+            kt_packages.entry(p.clone()).or_default().insert(dir.clone());
+            for t in &f.type_decls {
+                kt_types.entry(format!("{p}.{t}")).or_default().insert(dir.clone());
+            }
+        }
+        if matches!(f.lang, Language::Swift) {
+            for t in &f.type_decls {
+                swift_decl_dirs.entry(t.clone()).or_default().insert(dir.clone());
+            }
+            if let Some(base) = dir.rsplit('/').next().filter(|b| !b.is_empty()) {
+                swift_basenames.entry(base.to_string()).or_default().insert(dir.clone());
+            }
+        }
+    }
+
+    // パス3: 解決してエッジ化。
+    let mut raw_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for f in &facts {
+        let importer_dir = dir_of(&f.rel);
         let Some(&from) = index.get(&importer_dir) else { continue };
-        for u in &uses {
-            let target = match lang {
-                Language::Rust => resolve_rust(&u.imported_path, rel, &known),
-                Language::Ts => resolve_ts(&u.imported_path, &importer_dir, &known),
-                _ => None,
-            };
-            if let Some(target_file) = target {
-                let to_dir = dir_of(&target_file);
-                if let Some(&to) = index.get(&to_dir) {
-                    if from != to {
-                        raw_edges.insert((from, to));
+        let add = |to_dir: &str, raw_edges: &mut BTreeSet<(usize, usize)>| {
+            if let Some(&to) = index.get(to_dir) {
+                if from != to {
+                    raw_edges.insert((from, to));
+                }
+            }
+        };
+        for spec in &f.imports {
+            match f.lang {
+                Language::Rust => {
+                    if let Some(file) = resolve_rust(spec, &f.rel, &known) {
+                        add(&dir_of(&file), &mut raw_edges);
                     }
+                }
+                Language::Ts => {
+                    if let Some(file) = resolve_ts(spec, &importer_dir, &known) {
+                        add(&dir_of(&file), &mut raw_edges);
+                    }
+                }
+                Language::Kotlin => {
+                    for dir in resolve_kotlin(spec, &kt_packages, &kt_types) {
+                        add(&dir, &mut raw_edges);
+                    }
+                }
+                Language::Swift => {
+                    if let Some(dir) = resolve_swift_import(spec, &swift_basenames) {
+                        add(&dir, &mut raw_edges);
+                    }
+                }
+            }
+        }
+        // Swift: 型参照 → 一意宣言 dir へのエッジ。
+        for r in &f.swift_refs {
+            if let Some(dirs) = swift_decl_dirs.get(r) {
+                if dirs.len() == 1 {
+                    add(dirs.iter().next().unwrap(), &mut raw_edges);
                 }
             }
         }
@@ -129,16 +228,7 @@ pub fn build(path: &Path, config: &ResolvedConfig) -> ModuleGraph {
     for (a, b) in raw_edges {
         edges[a].insert(b);
     }
-    ModuleGraph { modules, edges, unresolved }
-}
-
-fn lang_name(l: Language) -> &'static str {
-    match l {
-        Language::Rust => "Rust",
-        Language::Swift => "Swift",
-        Language::Kotlin => "Kotlin",
-        Language::Ts => "TS",
-    }
+    ModuleGraph { modules, edges }
 }
 
 /// ファイルパスの root 相対 POSIX 文字列。
@@ -298,6 +388,51 @@ fn match_rust_file(cand: &str, known: &BTreeSet<String>) -> Option<String> {
         .cloned()
 }
 
+/// Kotlin import（完全修飾名）を宣言済み package への最長一致で解決する。
+/// `import a.b.c.Db` は `a.b.c.Db`（object/nested import）→ `a.b.c` → `a.b` … の順。
+/// wildcard `import a.b.*` は抽出時点で `a.b` になっているのでそのまま一致する。
+/// 外部パッケージ（kotlinx 等）は索引に無く空を返す。
+///
+/// 同一 package が複数 dir に跨る場合（KMP の commonMain/commonTest/jvmTest が同じ
+/// package を宣言する）は、import した symbol（次セグメント）を FQCN 索引 `symbols`
+/// （型 + トップレベル関数）で宣言 dir に絞る。絞れない残余（wildcard・未索引 symbol）
+/// を全 dir に張ると main→test の偽エッジ・偽循環を量産する（arrow-kt 実測）ので
+/// エッジ化しない — 誤エッジより miss。
+fn resolve_kotlin(
+    spec: &str,
+    packages: &BTreeMap<String, BTreeSet<String>>,
+    symbols: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let segs: Vec<&str> = spec.split('.').filter(|s| !s.is_empty()).collect();
+    for k in (1..=segs.len()).rev() {
+        let cand = segs[..k].join(".");
+        if let Some(dirs) = packages.get(&cand) {
+            if dirs.len() == 1 {
+                return dirs.iter().cloned().collect();
+            }
+            if k < segs.len() {
+                let fq = segs[..=k].join(".");
+                if let Some(sdirs) = symbols.get(&fq) {
+                    return sdirs.iter().cloned().collect();
+                }
+            }
+            return Vec::new();
+        }
+    }
+    Vec::new()
+}
+
+/// Swift `import M` を「swift ソースを含む basename==M の dir」へ解決（一意時のみ）。
+/// SwiftPM の `Sources/<Target>/` 慣習に乗る。Foundation 等の外部は索引に無く None。
+fn resolve_swift_import(module: &str, basenames: &BTreeMap<String, BTreeSet<String>>) -> Option<String> {
+    let dirs = basenames.get(module)?;
+    if dirs.len() == 1 {
+        dirs.iter().next().cloned()
+    } else {
+        None // 同名 dir が複数 → 曖昧。誤エッジより miss を選ぶ。
+    }
+}
+
 /// Tarjan の強連結成分分解。`adj[i]` = i の後続 index 集合。
 fn tarjan(adj: &[BTreeSet<usize>]) -> Vec<Vec<usize>> {
     struct State<'a> {
@@ -407,6 +542,57 @@ mod tests {
             resolve_rust("super::sub::Bar", "src/analyze/extract/rust.rs", &k).as_deref(),
             Some("src/analyze/extract/sub.rs")
         );
+    }
+
+    #[test]
+    fn kotlin_import_resolves_by_declared_package() {
+        let mut pkgs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        pkgs.entry("com.x.domain".into()).or_default().insert("src/domain".into());
+        pkgs.entry("com.x.infra".into()).or_default().insert("src/infra".into());
+        let types = BTreeMap::new();
+        // クラス import は最長一致で package に落ちる。
+        assert_eq!(resolve_kotlin("com.x.infra.Db", &pkgs, &types), vec!["src/infra".to_string()]);
+        // ネスト（inner class / companion）も落ちる。
+        assert_eq!(resolve_kotlin("com.x.infra.Db.Tx", &pkgs, &types), vec!["src/infra".to_string()]);
+        // wildcard は抽出時点で package 名そのもの。
+        assert_eq!(resolve_kotlin("com.x.domain", &pkgs, &types), vec!["src/domain".to_string()]);
+        // 外部パッケージ。
+        assert!(resolve_kotlin("kotlinx.coroutines.flow.Flow", &pkgs, &types).is_empty());
+    }
+
+    #[test]
+    fn kotlin_multi_dir_package_narrows_by_declared_symbol() {
+        // KMP: commonMain と commonTest が同じ package を宣言。symbol import は宣言 dir へ絞る。
+        let main = "src/commonMain/kotlin/arrow/core";
+        let test = "src/commonTest/kotlin/arrow/core";
+        let mut pkgs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for d in [main, test] {
+            pkgs.entry("arrow.core".into()).or_default().insert(d.into());
+        }
+        let mut symbols: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        symbols.entry("arrow.core.NonEmptyList".into()).or_default().insert(main.into());
+        symbols.entry("arrow.core.flatMap".into()).or_default().insert(main.into());
+        // 型 import → 宣言 dir のみ（test dir への偽エッジを張らない）。
+        assert_eq!(resolve_kotlin("arrow.core.NonEmptyList", &pkgs, &symbols), vec![main.to_string()]);
+        // トップレベル関数 import も同様に絞れる。
+        assert_eq!(resolve_kotlin("arrow.core.flatMap", &pkgs, &symbols), vec![main.to_string()]);
+        // 絞れない（wildcard / 未索引 symbol）→ 全 dir に張ると偽循環を量産するので miss。
+        assert!(resolve_kotlin("arrow.core", &pkgs, &symbols).is_empty());
+        assert!(resolve_kotlin("arrow.core.unknownVal", &pkgs, &symbols).is_empty());
+    }
+
+    #[test]
+    fn swift_import_resolves_unique_dir_basename() {
+        let mut base: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        base.entry("DomainKit".into()).or_default().insert("Sources/DomainKit".into());
+        base.entry("Dup".into()).or_default().insert("a/Dup".into());
+        base.entry("Dup".into()).or_default().insert("b/Dup".into());
+        assert_eq!(
+            resolve_swift_import("DomainKit", &base).as_deref(),
+            Some("Sources/DomainKit")
+        );
+        assert_eq!(resolve_swift_import("Dup", &base), None); // 曖昧
+        assert_eq!(resolve_swift_import("Foundation", &base), None); // 外部
     }
 
     #[test]

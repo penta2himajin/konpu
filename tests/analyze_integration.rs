@@ -386,6 +386,78 @@ fn ts_exported_free_fn_identity_resolves() {
 }
 
 #[test]
+fn module_graph_kotlin_resolves_via_package_declarations() {
+    use konpu::analyze::module_graph;
+    use konpu::analyze::template::ResolvedConfig;
+    // app/ が import com.x.domain.Money → domain/ が package com.x.domain を宣言 → app→domain。
+    let dir = std::env::temp_dir().join("konpu_modgraph_kt_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let domain = dir.join("domain");
+    let app = dir.join("app");
+    std::fs::create_dir_all(&domain).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        domain.join("Money.kt"),
+        "package com.x.domain\n\nclass Money(val amount: Int)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("App.kt"),
+        "package com.x.app\n\nimport com.x.domain.Money\nimport kotlinx.coroutines.flow.Flow\n\nclass App { val m: Money? = null }\n",
+    )
+    .unwrap();
+    let g = module_graph::build(&dir, &ResolvedConfig::empty());
+    let ai = g.modules.iter().position(|m| m == "app").expect("app node");
+    let di = g.modules.iter().position(|m| m == "domain").expect("domain node");
+    assert!(g.edges[ai].contains(&di), "app→domain edge expected: {:?}", g.modules);
+    assert!(!g.edges[di].contains(&ai), "no reverse edge");
+    // kotlinx は外部 → エッジ1本のみ。
+    assert_eq!(g.edges[ai].len(), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn module_graph_swift_resolves_type_refs_and_module_imports() {
+    use konpu::analyze::module_graph;
+    use konpu::analyze::template::ResolvedConfig;
+    let dir = std::env::temp_dir().join("konpu_modgraph_swift_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let domain = dir.join("Sources").join("DomainKit");
+    let ui = dir.join("UI");
+    let dup_a = dir.join("A");
+    let dup_b = dir.join("B");
+    for d in [&domain, &ui, &dup_a, &dup_b] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        domain.join("Money.swift"),
+        "struct Money: Equatable { let amount: Int }\n",
+    )
+    .unwrap();
+    // UI: import DomainKit（dir 名一致）+ 型参照 Money（一意宣言）。両経路とも UI→DomainKit。
+    std::fs::write(
+        ui.join("View.swift"),
+        "import Foundation\nimport DomainKit\n\nstruct View { let m: Money }\n",
+    )
+    .unwrap();
+    // Ambig は2 dir で宣言 → 型参照はエッジ化しない。
+    std::fs::write(dup_a.join("X.swift"), "struct Ambig { let x: Int }\n").unwrap();
+    std::fs::write(dup_b.join("Y.swift"), "struct Ambig { let y: Int }\n").unwrap();
+    std::fs::write(
+        ui.join("Uses.swift"),
+        "struct Uses { let a: Ambig }\n",
+    )
+    .unwrap();
+    let g = module_graph::build(&dir, &ResolvedConfig::empty());
+    let ui_i = g.modules.iter().position(|m| m == "UI").expect("UI node");
+    let dk_i = g.modules.iter().position(|m| m == "Sources/DomainKit").expect("DomainKit node");
+    assert!(g.edges[ui_i].contains(&dk_i), "UI→DomainKit edge expected: {:?}", g.modules);
+    // 曖昧型 Ambig と外部 Foundation はエッジ化しない → UI からのエッジは1本のみ。
+    assert_eq!(g.edges[ui_i].len(), 1, "only the unique-resolution edge: {:?}", g.edges[ui_i]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn module_graph_detects_cross_directory_cycle() {
     use konpu::analyze::module_graph;
     use konpu::analyze::template::ResolvedConfig;
