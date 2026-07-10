@@ -549,11 +549,33 @@ fn parse_impl(node: Node, source: &str) -> Option<ImplInfo> {
     let type_name = impl_type_name(node, source)?;
     let body = child_by_kind(node, "declaration_list")?;
     let mut methods = Vec::new();
+    // 演算子トレイトの `type Output = X`。メソッドの `Self::Output` 戻り値を解決する。
+    let mut output_ty: Option<String> = None;
     let mut cur = body.walk();
     for child in body.children(&mut cur) {
-        if child.kind() == "function_item" {
-            if let Some(m) = parse_method(child, source) {
-                methods.push(m);
+        match child.kind() {
+            "function_item" => {
+                if let Some(m) = parse_method(child, source) {
+                    methods.push(m);
+                }
+            }
+            "type_item" | "associated_type" => {
+                if let Some(name) = child.child_by_field_name("name") {
+                    if text_of(name, source) == "Output" {
+                        output_ty = child
+                            .child_by_field_name("type")
+                            .map(|t| text_of(t, source).trim().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // `Self::Output` を実際の関連型に置換（不明なら据え置き＝保守的に非マッチ）。
+    if let Some(out) = &output_ty {
+        for m in &mut methods {
+            if m.return_type.as_deref() == Some("Self::Output") {
+                m.return_type = Some(out.clone());
             }
         }
     }

@@ -23,15 +23,28 @@ use crate::domain::konpu::AlgebraicStructure;
 
 use super::extract::{AnalyzedDeclaration, ImplInfo, MethodInfo, SelfKind};
 
-/// 二項演算とみなすメソッド名（演算子トレイト + 慣用名）。優先順位でもある。
-const OP_NAMES: &[&str] = &[
-    "combine", "merge", "append", "concat", "op", "mappend", "add", "mul", "join", "meet", "and",
-    "or", "min", "max", "sub", "div", "bitand", "bitor", "bitxor",
+/// 演算の「族」: 二項演算と、その族に整合する単位元/逆元の慣用名。
+/// op/identity/inverse を独立に拾うと min+zero+neg のような非整合な組み合わせを
+/// 捏造してしまうため、identity/inverse は選んだ op の族からのみ拾う。
+/// 非結合の `sub`/`div` は代数構造の演算ではないので含めない。
+struct OpFamily {
+    ops: &'static [&'static str],
+    ids: &'static [&'static str],
+    invs: &'static [&'static str],
+}
+
+/// 族の並びと各 `ops` の並びが優先順位。add/mul を汎用モノイドより優先。
+const FAMILIES: &[OpFamily] = &[
+    OpFamily { ops: &["add"], ids: &["zero"], invs: &["neg", "negate"] },
+    OpFamily { ops: &["mul"], ids: &["one"], invs: &["recip", "inv", "inverse"] },
+    OpFamily {
+        ops: &["combine", "merge", "append", "concat", "mappend", "op", "join", "meet", "and", "or", "bitand", "bitor", "bitxor"],
+        ids: &["empty", "identity", "unit", "neutral", "zero", "one", "default"],
+        invs: &["inverse", "inv", "negate", "neg"],
+    },
+    // 半束（min/max）: 結合的だが型内に慣用の単位元/逆元は無い → Semigroup 止まり。
+    OpFamily { ops: &["min", "max"], ids: &[], invs: &[] },
 ];
-/// 単位元とみなす引数0の関連関数名。
-const ID_NAMES: &[&str] = &["identity", "empty", "zero", "unit", "neutral", "one", "default"];
-/// 逆元とみなすメソッド名。
-const INV_NAMES: &[&str] = &["inverse", "inv", "neg", "negate"];
 
 /// 全 impl と型サイトから、代数構造を推論した宣言を返す。
 /// `annotated` に既にある型はスキップ（アノテーション優先）。
@@ -65,14 +78,21 @@ pub fn infer_declarations(
 }
 
 fn infer_one(ty: &str, methods: &[&MethodInfo], path: PathBuf, line: usize) -> Option<AnalyzedDeclaration> {
-    let op = pick(methods, OP_NAMES, |m| is_binary_op(m, ty))?;
-    let id = pick(methods, ID_NAMES, |m| is_identity(m, ty));
-    let inv = pick(methods, INV_NAMES, |m| is_inverse(m, ty));
+    // 族の優先順に、閉じた二項演算メソッドを持つ最初の族を選ぶ。
+    let (op, fam) = FAMILIES.iter().find_map(|fam| {
+        fam.ops
+            .iter()
+            .find_map(|&name| pick(methods, name, |m| is_binary_op(m, ty)))
+            .map(|op| (op, fam))
+    })?;
+    // identity / inverse は選んだ族の慣用名からのみ拾う（非整合な組み合わせを防ぐ）。
+    let id = fam.ids.iter().find_map(|&name| pick(methods, name, |m| is_identity(m, ty)));
+    let inv = fam.invs.iter().find_map(|&name| pick(methods, name, |m| is_inverse(m, ty)));
 
     let structure = match (id.is_some(), inv.is_some()) {
         (true, true) => AlgebraicStructure::Group,
         (true, false) => AlgebraicStructure::Monoid,
-        _ => AlgebraicStructure::Semigroup, // 演算のみ（逆元だけで単位元無しも Semigroup 扱い）
+        _ => AlgebraicStructure::Semigroup, // 演算のみ（単位元無しの逆元は無視）
     };
     let identity_name = (structure.rank() >= 2).then(|| id.unwrap().name.clone());
     let inverse_name = (structure.rank() >= 3).then(|| inv.unwrap().name.clone());
@@ -90,18 +110,9 @@ fn infer_one(ty: &str, methods: &[&MethodInfo], path: PathBuf, line: usize) -> O
     })
 }
 
-/// 名前優先リスト順に、述語を満たす最初のメソッドを選ぶ。無ければ述語を満たす任意の先頭。
-fn pick<'a>(
-    methods: &[&'a MethodInfo],
-    priority: &[&str],
-    pred: impl Fn(&MethodInfo) -> bool,
-) -> Option<&'a MethodInfo> {
-    for &name in priority {
-        if let Some(m) = methods.iter().find(|m| m.name == name && pred(m)) {
-            return Some(m);
-        }
-    }
-    None
+/// 名前が一致し述語を満たす最初のメソッドを返す。
+fn pick<'a>(methods: &[&'a MethodInfo], name: &str, pred: impl Fn(&MethodInfo) -> bool) -> Option<&'a MethodInfo> {
+    methods.iter().find(|m| m.name == name && pred(m)).copied()
 }
 
 /// 閉じた二項演算か: `fn f(self|&self, other: T) -> T` または `fn f(a: T, b: T) -> T`。
@@ -149,10 +160,10 @@ fn strip_refs(s: &str) -> &str {
 
 fn type_is(s: &str, ty: &str) -> bool {
     let s = strip_refs(s).trim();
-    // `Self` と、演算子トレイトが返す `Self::Output` は当該型とみなす。
-    if s == "Self" || s == "Self::Output" {
+    if s == "Self" {
         return true;
     }
+    // 演算子トレイトの `Self::Output` は抽出時に実型へ解決済み（extract::parse_impl）。
     // ジェネリック引数を落として基底型名で照合する（`Vector2D<T, U>` → `Vector2D`）。
     // konpu は型を基底名で扱う（impl_type_name も同様）ので整合する。
     let base = s.split('<').next().unwrap_or(s).trim();
@@ -236,17 +247,43 @@ mod tests {
     }
 
     #[test]
-    fn operator_trait_self_output_and_generics() {
-        // impl Add/Neg for Vector<T,U> { fn add(self, other: Self) -> Self::Output; fn neg(self) -> Self::Output }
-        // plus a generic-typed param and a `zero()` -> Vector<T,U>.
+    fn generic_base_matching() {
+        // After extraction resolves Self::Output, methods carry concrete generic
+        // types; base-name matching (Vector<T,U> -> Vector) must still detect them.
         let d = infer("Vector", vec![
-            method("add", Some(SelfKind::Owned), &["Self"], Some("Self::Output"), false),
-            method("neg", Some(SelfKind::Owned), &[], Some("Self::Output"), false),
+            method("add", Some(SelfKind::Owned), &["Vector<T, U>"], Some("Vector<T, U>"), false),
+            method("neg", Some(SelfKind::Owned), &[], Some("Vector<T, U>"), false),
             method("zero", None, &[], Some("Vector<T, U>"), true),
         ]).unwrap();
         assert_eq!(d.target_structure, AlgebraicStructure::Group);
         assert_eq!(d.operation_name, "add");
         assert_eq!(d.inverse_name.as_deref(), Some("neg"));
+    }
+
+    #[test]
+    fn min_op_does_not_borrow_zero_and_neg() {
+        // Point-like: only min/max are closed (add returns via Vector etc.).
+        // min belongs to the semilattice family which has no identity/inverse,
+        // so zero/neg must NOT be attached -> Semigroup, not a bogus Group.
+        let d = infer("Point", vec![
+            method("min", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
+            method("max", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
+            method("zero", None, &[], Some("Self"), true),
+            method("neg", Some(SelfKind::Owned), &[], Some("Self"), false),
+        ]).unwrap();
+        assert_eq!(d.target_structure, AlgebraicStructure::Semigroup);
+        assert_eq!(d.operation_name, "min");
+        assert!(d.identity_name.is_none());
+        assert!(d.inverse_name.is_none());
+    }
+
+    #[test]
+    fn sub_is_not_an_op() {
+        // subtraction is non-associative -> not an algebraic-structure op.
+        let d = infer("X", vec![
+            method("sub", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
+        ]);
+        assert!(d.is_none());
     }
 
     #[test]
@@ -259,3 +296,4 @@ mod tests {
         assert_eq!(d.target_structure, AlgebraicStructure::Semigroup);
     }
 }
+
