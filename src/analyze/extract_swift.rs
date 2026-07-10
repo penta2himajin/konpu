@@ -321,10 +321,50 @@ pub fn extract_impls(root: Node, source: &str) -> Vec<ImplInfo> {
                 _ => {}
             }
         }
+        // プロトコル準拠が保証する代数サーフェスを合成メソッドとして足す。
+        methods.extend(synthetic_conformance_methods(&conformances(n, source), &type_name));
         if !methods.is_empty() {
             out.push(ImplInfo { type_name, methods });
         }
     });
+    out
+}
+
+/// `class_declaration` が準拠する named プロトコル一覧。
+fn conformances(n: Node, source: &str) -> Vec<String> {
+    let mut cur = n.walk();
+    n.children(&mut cur)
+        .filter(|c| c.kind() == "inheritance_specifier")
+        .filter_map(|c| first_child_of_kind(c, "user_type"))
+        .filter_map(|ut| first_child_of_kind(ut, "type_identifier"))
+        .map(|ti| text_of(ti, source).to_string())
+        .collect()
+}
+
+/// プロトコル準拠から保証される代数サーフェスを合成メソッドで返す。
+/// `AdditiveArithmetic` はコンパイラ強制で `+` と `static var zero` を保証する
+/// （閉じた加法＋単位元）→ add+zero に正規化し、明示メソッドが無くても Monoid を
+/// 推論できるようにする（準拠はコンパイラ検証済みなので honest）。
+/// ponytail: Group まで上げるには逆元（negate 等）の明示が要る。準拠だけでは
+/// 構造的に確認できる床＝Monoid に留める。
+fn synthetic_conformance_methods(protos: &[String], ty: &str) -> Vec<MethodInfo> {
+    let mut out = Vec::new();
+    if protos.iter().any(|p| p == "AdditiveArithmetic") {
+        out.push(MethodInfo {
+            name: "add".to_string(),
+            self_param: None,
+            params: vec![ty.to_string(), ty.to_string()],
+            return_type: Some(ty.to_string()),
+            is_assoc_fn: true,
+        });
+        out.push(MethodInfo {
+            name: "zero".to_string(),
+            self_param: None,
+            params: Vec::new(),
+            return_type: Some(ty.to_string()),
+            is_assoc_fn: true,
+        });
+    }
     out
 }
 
@@ -346,6 +386,28 @@ pub fn extract_free_fns(root: Node, source: &str) -> Vec<MethodInfo> {
     out
 }
 
+/// `function_declaration` の名前（`func` トークンの次の子）を konpu 用に正規化。
+/// 演算子は族名にマップ（`+`→add, `*`→mul）。非結合の `-`/`/` 等は生のまま
+/// （どの族にも一致せず推論では無視される＝正しい）。
+fn fn_name(n: Node, source: &str) -> Option<String> {
+    let mut cur = n.walk();
+    let mut seen_func = false;
+    for c in n.children(&mut cur) {
+        if seen_func {
+            let raw = text_of(c, source).trim();
+            return Some(match raw {
+                "+" => "add".to_string(),
+                "*" => "mul".to_string(),
+                other => other.to_string(),
+            });
+        }
+        if !c.is_named() && text_of(c, source).trim() == "func" {
+            seen_func = true;
+        }
+    }
+    None
+}
+
 /// `modifiers` に指定の修飾子があるか。
 fn has_modifier(fn_node: Node, source: &str, want: &str) -> bool {
     let Some(mods) = first_child_of_kind(fn_node, "modifiers") else {
@@ -358,13 +420,9 @@ fn has_modifier(fn_node: Node, source: &str, want: &str) -> bool {
 
 /// `function_declaration` → `MethodInfo`。
 fn parse_function(n: Node, source: &str) -> Option<MethodInfo> {
-    // 名前: modifiers/parameter/型の外にある直下の simple_identifier。
-    let name = {
-        let mut cur = n.walk();
-        n.children(&mut cur)
-            .find(|c| c.kind() == "simple_identifier")
-            .map(|c| text_of(c, source).to_string())?
-    };
+    // 名前は `func` トークンの次の子。通常メソッドは `simple_identifier`、
+    // 演算子メソッドは無名トークン（`+`/`*` 等）。演算子は konpu の族名へ正規化。
+    let name = fn_name(n, source)?;
     let is_static = has_modifier(n, source, "static") || has_modifier(n, source, "class");
     let is_mutating = has_modifier(n, source, "mutating");
     let self_param = if is_static {
@@ -564,6 +622,41 @@ mod tests {
         assert_eq!(s.kind, TypeKind::Struct);
         // static `zero` excluded; z keeps its array type text.
         assert_eq!(s.field_types, vec!["Int".to_string(), "Money".to_string(), "[Money]".to_string()]);
+    }
+
+    #[test]
+    fn plus_operator_maps_to_add_binary_op() {
+        let impls = impls_of(
+            "struct Vec2 {\n  static func + (lhs: Vec2, rhs: Vec2) -> Vec2 { lhs }\n}",
+        );
+        let add = method(&impls[0], "add"); // `+` normalized to `add`
+        assert!(add.is_assoc_fn);
+        assert_eq!(add.params, vec!["Vec2".to_string(), "Vec2".to_string()]);
+        assert_eq!(add.return_type.as_deref(), Some("Vec2"));
+    }
+
+    #[test]
+    fn star_operator_maps_to_mul() {
+        let impls = impls_of("struct M {\n  static func * (a: M, b: M) -> M { a }\n}");
+        assert!(impls[0].methods.iter().any(|m| m.name == "mul"));
+    }
+
+    #[test]
+    fn additive_arithmetic_conformance_synthesizes_add_and_zero() {
+        // No explicit +/zero in source; conformance guarantees them.
+        let impls = impls_of("struct Money: AdditiveArithmetic, Equatable {\n  let amount: Int\n}");
+        let m = impls.iter().find(|i| i.type_name == "Money").unwrap();
+        assert!(m.methods.iter().any(|x| x.name == "add" && x.params.len() == 2));
+        assert!(m.methods.iter().any(|x| x.name == "zero" && x.params.is_empty()));
+    }
+
+    #[test]
+    fn non_algebraic_conformance_synthesizes_nothing() {
+        let impls = impls_of("struct P: Equatable {\n  static func + (a: P, b: P) -> P { a }\n}");
+        // only the real `+`->add, no synthetic zero from Equatable.
+        let p = &impls[0];
+        assert!(p.methods.iter().any(|m| m.name == "add"));
+        assert!(!p.methods.iter().any(|m| m.name == "zero"));
     }
 
     #[test]
