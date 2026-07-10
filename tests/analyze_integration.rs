@@ -358,6 +358,34 @@ fn ts_reverse_import_boundary_via_from_modules() {
     std::fs::remove_dir(&dir).ok();
 }
 #[test]
+fn ts_exported_free_fn_identity_resolves() {
+    // oxidtr TS output shape: annotated interface in models.ts, op/identity as
+    // `export function`s (wrapped in export_statement) returning the qualified
+    // `M.Money`. Both the export wrapper and the dotted path must not hide the
+    // identity → no MissingIdentity.
+    let dir = std::env::temp_dir().join("konpu_ts_free_fn_identity_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("models.ts"),
+        "// konpu: monoid(op: add, identity: zero)\nexport interface Money { amount: number; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("operations.ts"),
+        "import type * as M from './models';\nexport function zero(): M.Money { throw new Error(\"todo\"); }\nexport function add(a: M.Money, b: M.Money): M.Money { throw new Error(\"todo\"); }\n",
+    )
+    .unwrap();
+    let diags = analyze_path(&dir);
+    assert_eq!(
+        count(&diags, Severity::Error, DiagnosticRule::MissingIdentity),
+        0,
+        "export-wrapped free fn with dotted return type must resolve as identity: {:?}",
+        diags.iter().map(|d| &d.diag.rule).collect::<Vec<_>>()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn module_graph_detects_cross_directory_cycle() {
     use konpu::analyze::module_graph;
     use konpu::analyze::template::ResolvedConfig;

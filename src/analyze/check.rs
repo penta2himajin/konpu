@@ -138,6 +138,7 @@ fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], singletons: &[String], n
 }
 
 /// メソッドの戻り型の基底名（参照・ジェネリクス・パスを剥がす）。
+/// パス修飾は Rust の `::` と TS/Swift/Kotlin の `.`（`M.Money` 等）の両方を剥がす。
 fn ret_base_name(m: &MethodInfo) -> Option<String> {
     let mut s = m.return_type.as_deref()?.trim();
     while let Some(r) = s.strip_prefix('&') {
@@ -147,7 +148,8 @@ fn ret_base_name(m: &MethodInfo) -> Option<String> {
     if base.is_empty() || base.contains(['[', '(', ',', ' ']) {
         return None;
     }
-    Some(base.rsplit("::").next().unwrap_or(base).to_string())
+    let base = base.rsplit("::").next().unwrap_or(base);
+    Some(base.rsplit('.').next().unwrap_or(base).to_string())
 }
 
 fn op_returns_self(decl: &AnalyzedDeclaration, op: &super::extract::MethodInfo) -> bool {

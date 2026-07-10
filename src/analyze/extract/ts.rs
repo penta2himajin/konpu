@@ -487,8 +487,10 @@ pub fn extract_free_fns(root: Node, source: &str) -> Vec<MethodInfo> {
     let mut out = Vec::new();
     let mut cur = root.walk();
     for child in root.children(&mut cur) {
-        if child.kind() == "function_declaration" {
-            if let Some(m) = parse_fn_like(child, source, true) {
+        // `export function f()` は export_statement にラップされる。剥がして拾う。
+        let node = unwrap_export(child);
+        if node.kind() == "function_declaration" {
+            if let Some(m) = parse_fn_like(node, source, true) {
                 out.push(m); // トップレベル関数は self 無し・関連関数扱い。
             }
         }
