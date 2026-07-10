@@ -363,7 +363,8 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
 - [x] Swift アノテーション規約 = 推論優先 + `// konpu:` コメント
   （monoid/semigroup/group/magma 宣言・law(<laws>)・ignore）
 - [x] `--test-results` が `swift test`(XCTest) 出力も解釈（FailingLawTest/compliance）
-- [ ] 残: 演算子メソッド（`+`/`*`）・`AdditiveArithmetic` 準拠検出・Swift 版 scaffold
+- [x] 演算子メソッド（`+`→add / `*`→mul）・`AdditiveArithmetic` 準拠→合成 add+zero で Monoid 推論
+- [ ] 残: Swift 版 scaffold、`[T]`/`T?` の propagation Unbounded 判定
 - [ ] Kotlin / TypeScript（3言語目以降。シームは整備済み）
 
 #### 2-C：oxidtr正式連携
