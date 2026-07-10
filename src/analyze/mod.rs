@@ -3,6 +3,8 @@ pub mod call_graph;
 pub mod check;
 pub mod extract;
 pub mod extract_swift;
+#[cfg(feature = "call-graph")]
+pub mod call_graph_swift;
 pub mod infer;
 pub mod parser;
 #[cfg(feature = "call-graph")]

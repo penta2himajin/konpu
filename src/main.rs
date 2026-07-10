@@ -152,6 +152,16 @@ fn resolve_config_path(explicit: Option<&str>, analyze_path: &std::path::Path) -
     std::path::PathBuf::from("konpu.toml")
 }
 
+/// `.swift` のみで `.rs` を含まないディレクトリを Swift プロジェクトと判定。
+#[cfg(feature = "call-graph")]
+fn is_swift_project(path: &std::path::Path) -> bool {
+    use konpu::analyze::parser::{collect_source_files, Language};
+    let files = collect_source_files(path);
+    let swift = files.iter().filter(|(_, l)| *l == Language::Swift).count();
+    let rust = files.iter().filter(|(_, l)| *l == Language::Rust).count();
+    swift > 0 && rust == 0
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -382,8 +392,15 @@ fn main() {
                     std::process::exit(2);
                 }
             };
+            // Swift プロジェクト（.swift のみ）は tree-sitter で Facts を直接構築
+            // （外部ツール不要、instantiated も構築サイトで埋まる）。それ以外は
+            // rust-analyzer/SCIP 経路。--scip 指定時は常に SCIP。
+            let is_swift = scip.is_none() && is_swift_project(std::path::Path::new(&path));
             let facts = match &scip {
                 Some(f) => facts_from_scip_file(std::path::Path::new(f)),
+                None if is_swift => {
+                    Ok(konpu::analyze::call_graph_swift::facts_from_swift_project(std::path::Path::new(&path)))
+                }
                 None => facts_from_project(std::path::Path::new(&path)),
             };
             let mut facts = match facts {
@@ -396,7 +413,8 @@ fn main() {
             // RTA: refine the instantiated set to actual construction sites found
             // in the source (tree-sitter), instead of SCIP's "any type reference"
             // which degenerates to CHA. See docs/layer2-call-graph-design.md §6.1.
-            if prec == Precision::Rta {
+            // Swift facts already carry construction sites, so skip the Rust refiner.
+            if prec == Precision::Rta && !is_swift {
                 facts.instantiated =
                     konpu::analyze::call_graph::constructed_types(std::path::Path::new(&path));
             }

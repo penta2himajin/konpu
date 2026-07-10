@@ -315,6 +315,7 @@ mod tests {
                 name: "d2i".to_string(),
                 from_pattern: "src/domain/**".to_string(),
                 to_pattern: "src/infra/**".to_string(),
+                from_modules: Vec::new(),
                 preserve: vec![AlgebraicStructure::Monoid],
                 preserve_severity: sev,
                 preserve_checks: PreserveChecks { aggregate: true, construct: true },
