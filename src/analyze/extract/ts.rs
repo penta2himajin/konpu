@@ -55,31 +55,57 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze
 /// 関数型の代数インスタンスを ImplInfo + type_site として抽出する。
 ///
 /// fp-ts 系の型クラスは `interface Semigroup<A> { concat: (x: A, y: A) => A }` を
-/// クラスでなく **const オブジェクト**で実装する: `const M: Monoid<number> = { concat, empty }`。
-/// これを「const 名を carrier 型とみなした ImplInfo」に正規化する（op/identity の型は
-/// const 名に揃える）。intentional なトリガとして型注釈が `Semigroup`/`Monoid`/`Group` を
-/// 名指すものだけ拾う（任意オブジェクトの誤検出を避ける）。構造（Semigroup/Monoid/Group）
-/// は注釈ではなく実際の op/identity の有無から infer が導く。
+/// クラスでなく **値**で実装する。3 形態を拾う:
+/// - const オブジェクト: `const M: Monoid<number> = { concat, empty }`（fp-ts）。
+/// - const factory: `const min = (O): Semigroup<A> => make(...)`（Effect、値が arrow で戻り型注釈）。
+/// - function factory: `function getMonoid<A>(): Monoid<A> { ... }`。
+///
+/// いずれも「宣言名を carrier 型とみなした ImplInfo」に正規化する（op/identity の型は
+/// 宣言名に揃える）。トリガは **型注釈/戻り型注釈が `Semigroup`/`Monoid`/`Group`
+/// （`Se.Semigroup` 等の修飾可）を名指すこと**（tsc 検証済み＝combine/empty の存在保証。
+/// 任意オブジェクトの誤検出を避ける）。body が object literal なら実際の op/identity 名を
+/// shape から取り、factory（object が見えない）なら注釈の型クラスから構造を合成する。
 fn extract_instances(root: Node, source: &str, path: &Path) -> Vec<(ImplInfo, (String, PathBuf, usize))> {
     let mut out = Vec::new();
     recurse(root, &mut |n| {
-        if n.kind() != "variable_declarator" {
-            return;
-        }
-        let Some(name_node) = n.child_by_field_name("name") else { return };
+        let (name_node, iface, body) = match n.kind() {
+            // const X: Iface<..> = <value>  /  const X = (..): Iface<..> => <value>
+            "variable_declarator" => {
+                let Some(name) = n.child_by_field_name("name") else { return };
+                let value = n.child_by_field_name("value");
+                // 宣言自体の型注釈、無ければ値が arrow のときその戻り型注釈。
+                let iface = n
+                    .child_by_field_name("type")
+                    .and_then(|ann| algebra_interface(ann, source))
+                    .or_else(|| {
+                        value
+                            .filter(|v| v.kind() == "arrow_function")
+                            .and_then(|v| v.child_by_field_name("return_type"))
+                            .and_then(|rt| algebra_interface(rt, source))
+                    });
+                (name, iface, value)
+            }
+            // function getMonoid<A>(): Iface<..> { ... }
+            "function_declaration" => {
+                let Some(name) = n.child_by_field_name("name") else { return };
+                let iface = n
+                    .child_by_field_name("return_type")
+                    .and_then(|rt| algebra_interface(rt, source));
+                (name, iface, None)
+            }
+            _ => return,
+        };
         if name_node.kind() != "identifier" {
             return;
         }
-        let Some(ann) = n.child_by_field_name("type") else { return };
-        if algebra_interface(ann, source).is_none() {
-            return;
-        }
-        let Some(obj) = n.child_by_field_name("value") else { return };
-        if obj.kind() != "object" {
-            return;
-        }
+        let Some(iface) = iface else { return };
         let name = text_of(name_node, source).trim().to_string();
-        let methods = object_methods(obj, source, &name);
+        // body が object literal ならその shape から実 op/identity 名を、そうでなければ
+        // （factory 等）型クラス名から構造を合成する。
+        let methods = match body.filter(|b| b.kind() == "object") {
+            Some(obj) => object_methods(obj, source, &name),
+            None => synth_methods(iface, &name),
+        };
         if methods.is_empty() {
             return;
         }
@@ -89,6 +115,27 @@ fn extract_instances(root: Node, source: &str, path: &Path) -> Vec<(ImplInfo, (S
             (name, path.to_path_buf(), line),
         ));
     });
+    out
+}
+
+/// 型クラス名から期待される代数構造を合成する（body が opaque な factory 用）。
+/// carrier=宣言名。op は必ず、Monoid/Group は単位元、Group は逆元を足す。名前は
+/// 族の正準名（infer が族照合で拾える汎用名）。実際の op 名は factory 内部で不可視。
+fn synth_methods(iface: &str, inst: &str) -> Vec<MethodInfo> {
+    let m = |name: &str, arity: usize| MethodInfo {
+        name: name.to_string(),
+        self_param: None,
+        params: vec![inst.to_string(); arity],
+        return_type: Some(inst.to_string()),
+        is_assoc_fn: true,
+    };
+    let mut out = vec![m("combine", 2)];
+    if matches!(iface, "Monoid" | "Group") {
+        out.push(m("empty", 0));
+    }
+    if iface == "Group" {
+        out.push(m("inverse", 1));
+    }
     out
 }
 
@@ -716,6 +763,33 @@ mod tests {
     fn plain_object_without_algebra_annotation_ignored() {
         // 型注釈が代数型クラスを名指さないオブジェクトは拾わない（誤検出回避）。
         let src = "const cfg = { concat: (x, y) => x + y, empty: 0 };";
+        assert!(instances_of(src).is_empty());
+    }
+
+    #[test]
+    fn const_arrow_factory_synthesizes_from_return_type() {
+        // Effect 風: `const min = (O): Semigroup<A> => make(...)`。body は object でないので
+        // 戻り型注釈の型クラスから構造を合成（combine のみ → Semigroup）。
+        let src = "export const min = <A>(O: Order<A>): Semigroup<A> => make((x, y) => x);";
+        let m = &instances_of(src)[0];
+        assert_eq!(m.type_name, "min");
+        let combine = m.methods.iter().find(|m| m.name == "combine").unwrap();
+        assert_eq!(combine.params.len(), 2);
+        assert!(m.methods.iter().all(|m| m.name != "empty")); // Semigroup: 単位元無し
+    }
+
+    #[test]
+    fn function_factory_monoid_synthesizes_op_and_identity() {
+        let src = "export function getMonoid<A>(): Monoid<A> { return make(); }";
+        let m = &instances_of(src)[0];
+        assert_eq!(m.type_name, "getMonoid");
+        assert!(m.methods.iter().any(|m| m.name == "combine" && m.params.len() == 2));
+        assert!(m.methods.iter().any(|m| m.name == "empty" && m.params.is_empty()));
+    }
+
+    #[test]
+    fn non_algebra_return_type_ignored() {
+        let src = "export const mk = <A>(): Order<A> => makeOrder();\nfunction f(): number { return 0; }";
         assert!(instances_of(src).is_empty());
     }
 }
