@@ -88,6 +88,8 @@ pub fn analyze_full_with_cg(
 struct Extracted {
     decls: Vec<extract::AnalyzedDeclaration>,
     impls: Vec<extract::ImplInfo>,
+    /// impl 外のモジュール自由関数。単位元候補・存在検査に使う。
+    free_fns: Vec<extract::MethodInfo>,
     law_tests: Vec<extract::LawTestInfo>,
     ignores: Vec<extract::IgnoreInfo>,
     uses: Vec<extract::UseStatement>,
@@ -132,6 +134,7 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
     let mut ex = Extracted {
         decls: Vec::new(),
         impls: Vec::new(),
+        free_fns: Vec::new(),
         law_tests: Vec::new(),
         ignores: Vec::new(),
         uses: Vec::new(),
@@ -149,6 +152,7 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
         let root = tree.root_node();
         ex.decls.extend(extract::extract_declarations(root, &source, file));
         ex.impls.extend(extract::extract_impls(root, &source));
+        ex.free_fns.extend(extract::extract_free_fns(root, &source));
         ex.law_tests.extend(extract::extract_law_tests(root, &source, file));
         ex.ignores.extend(extract::extract_ignores(root, &source, file));
         type_infos.extend(propagation::extract_type_infos(root, &source));
@@ -163,7 +167,7 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
         let annotated: std::collections::HashSet<String> =
             ex.decls.iter().map(|d| d.type_name.clone()).collect();
         ex.decls
-            .extend(infer::infer_declarations(&ex.impls, &type_sites, &annotated));
+            .extend(infer::infer_declarations(&ex.impls, &ex.free_fns, &type_sites, &annotated));
     }
     for decl in &mut ex.decls {
         let (size, _count) = propagation::compute_propagation(&decl.type_name, &type_infos);
@@ -181,7 +185,7 @@ fn run_diagnostics(
 ) -> Vec<AnalyzedDiagnostic> {
     let mut out: Vec<AnalyzedDiagnostic> = Vec::new();
     for decl in &ex.decls {
-        for diag in check::check_declaration(decl, &ex.impls) {
+        for diag in check::check_declaration(decl, &ex.impls, &ex.free_fns) {
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
         for diag in check::check_propagation(decl, config, root) {

@@ -7,12 +7,13 @@ use crate::domain::konpu::{
 };
 use crate::domain::fixtures::all_law_requirements;
 
-use super::extract::{AnalyzedDeclaration, ImplInfo, LawTestInfo, SelfKind};
+use super::extract::{AnalyzedDeclaration, ImplInfo, LawTestInfo, MethodInfo, SelfKind};
 use super::template::{self, ResolvedConfig};
 
 pub fn check_declaration(
     decl: &AnalyzedDeclaration,
     impls: &[ImplInfo],
+    free_fns: &[MethodInfo],
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let declaration = AlgebraicDeclaration {
@@ -35,7 +36,7 @@ pub fn check_declaration(
 
     if decl.target_structure.rank() >= 2 {
         let id_name = decl.identity_name.as_deref();
-        if id_name.is_none() || !has_method(&matching, id_name.unwrap_or("")) {
+        if id_name.is_none() || !has_op(&matching, free_fns, id_name.unwrap_or(""), &decl.type_name) {
             had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
@@ -47,7 +48,7 @@ pub fn check_declaration(
 
     if decl.target_structure.rank() >= 3 {
         let inv_name = decl.inverse_name.as_deref();
-        if inv_name.is_none() || !has_method(&matching, inv_name.unwrap_or("")) {
+        if inv_name.is_none() || !has_op(&matching, free_fns, inv_name.unwrap_or(""), &decl.type_name) {
             had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
@@ -118,11 +119,30 @@ pub fn check_declaration(
     out
 }
 
-fn has_method(impls: &[&ImplInfo], name: &str) -> bool {
-    impls
-        .iter()
-        .flat_map(|i| i.methods.iter())
-        .any(|m| m.name == name)
+/// 単位元/逆元の存在: 型の impl メソッド、または `ty` を返す同名の自由関数。
+/// 後者は oxidtr が receiver なし演算（単位元）を自由関数として出す形に対応する
+/// （infer 側と同じ帰属規則）。
+fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], name: &str, ty: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    impls.iter().flat_map(|i| i.methods.iter()).any(|m| m.name == name)
+        || free_fns
+            .iter()
+            .any(|f| f.name == name && ret_base_name(f).as_deref() == Some(ty))
+}
+
+/// メソッドの戻り型の基底名（参照・ジェネリクス・パスを剥がす）。
+fn ret_base_name(m: &MethodInfo) -> Option<String> {
+    let mut s = m.return_type.as_deref()?.trim();
+    while let Some(r) = s.strip_prefix('&') {
+        s = r.trim_start().strip_prefix("mut ").unwrap_or(r.trim_start()).trim_start();
+    }
+    let base = s.split('<').next().unwrap_or(s).trim();
+    if base.is_empty() || base.contains(['[', '(', ',', ' ']) {
+        return None;
+    }
+    Some(base.rsplit("::").next().unwrap_or(base).to_string())
 }
 
 fn op_returns_self(decl: &AnalyzedDeclaration, op: &super::extract::MethodInfo) -> bool {

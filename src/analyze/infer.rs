@@ -57,8 +57,11 @@ const FAMILIES: &[OpFamily] = &[
 
 /// 全 impl と型サイトから、代数構造を推論した宣言を返す。
 /// `annotated` に既にある型はスキップ（アノテーション優先）。
+/// `free_fns` は impl 外のモジュール関数。戻り型で型に帰属させ、単位元候補に加える
+/// （oxidtr は receiver なし演算を自由関数として出すため）。
 pub fn infer_declarations(
     impls: &[ImplInfo],
+    free_fns: &[MethodInfo],
     type_sites: &HashMap<String, (PathBuf, usize)>,
     annotated: &HashSet<String>,
 ) -> Vec<AnalyzedDeclaration> {
@@ -69,6 +72,18 @@ pub fn infer_declarations(
             .entry(imp.type_name.as_str())
             .or_default()
             .extend(imp.methods.iter());
+    }
+    // 自由関数を戻り型（基底名）で該当型のプールに足す。名前＋シグネチャが族に
+    // 一致したものだけが拾われる（`fn zero() -> Money` は単位元、無関係な
+    // `fn make() -> Money` はどの族名にも一致せず無視される）。
+    // ponytail: is_inverse は引数を見ないので、逆元族名の無引数自由関数が
+    // 逆元候補になりうる。oxidtr がそれを出す形は無く実害は見ていない。
+    for f in free_fns {
+        if let Some(base) = ret_base_name(f) {
+            if let Some(bucket) = methods_by_type.get_mut(base.as_str()) {
+                bucket.push(f);
+            }
+        }
     }
     let mut out = Vec::new();
     for (ty, methods) in methods_by_type {
@@ -184,6 +199,17 @@ fn type_is(s: &str, ty: &str) -> bool {
 
 fn ret_is(m: &MethodInfo, ty: &str) -> bool {
     m.return_type.as_deref().is_some_and(|r| type_is(r, ty))
+}
+
+/// メソッドの戻り型の基底名（参照・ジェネリクス・パスを剥がす）。
+/// 自由関数を戻り型で型に帰属させる際のキー。`Self` は自由関数には現れない。
+fn ret_base_name(m: &MethodInfo) -> Option<String> {
+    let s = strip_refs(m.return_type.as_deref()?);
+    let base = s.split('<').next().unwrap_or(s).trim();
+    if base.is_empty() || base.contains(['[', '(', ',', ' ']) {
+        return None;
+    }
+    Some(base.rsplit("::").next().unwrap_or(base).to_string())
 }
 
 #[cfg(test)]
@@ -318,6 +344,44 @@ mod tests {
             method("sub", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
         ]);
         assert!(d.is_none());
+    }
+
+    #[test]
+    fn free_fn_identity_lifts_semigroup_to_monoid() {
+        // oxidtr shape: combine is a receiver method in `impl Money`, but the
+        // identity `zero() -> Money` is a module-level free fn (operations.rs).
+        // infer_declarations must attribute the free fn by return type and
+        // treat it as the identity -> Monoid, not Semigroup.
+        use super::super::extract::ImplInfo;
+        let impls = vec![ImplInfo {
+            type_name: "Money".to_string(),
+            methods: vec![method("combine", Some(SelfKind::Ref), &["&Money"], Some("Money"), false)],
+        }];
+        let free_fns = vec![method("zero", None, &[], Some("Money"), true)];
+        let mut sites = HashMap::new();
+        sites.insert("Money".to_string(), (PathBuf::from("src/x.rs"), 1));
+        let decls = infer_declarations(&impls, &free_fns, &sites, &HashSet::new());
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].target_structure, AlgebraicStructure::Monoid);
+        assert_eq!(decls[0].operation_name, "combine");
+        assert_eq!(decls[0].identity_name.as_deref(), Some("zero"));
+    }
+
+    #[test]
+    fn free_fn_of_unrelated_type_is_ignored() {
+        // A free fn returning a type with no impl must NOT create a decl.
+        use super::super::extract::ImplInfo;
+        let impls = vec![ImplInfo {
+            type_name: "Money".to_string(),
+            methods: vec![method("combine", Some(SelfKind::Ref), &["&Money"], Some("Money"), false)],
+        }];
+        // `empty() -> Other` is irrelevant to Money; Money stays Semigroup.
+        let free_fns = vec![method("empty", None, &[], Some("Other"), true)];
+        let mut sites = HashMap::new();
+        sites.insert("Money".to_string(), (PathBuf::from("src/x.rs"), 1));
+        let decls = infer_declarations(&impls, &free_fns, &sites, &HashSet::new());
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].target_structure, AlgebraicStructure::Semigroup);
     }
 
     #[test]

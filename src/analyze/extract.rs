@@ -555,6 +555,31 @@ fn recurse_type_sites(node: Node, source: &str, path: &Path, out: &mut Vec<(Stri
     }
 }
 
+/// impl/trait の外にあるモジュールレベルの自由関数を集める。
+/// oxidtr は receiver なし演算（単位元・コンストラクタ）を `operations.rs` の
+/// 自由関数として出す。これらを戻り型で型に帰属させ、推論の単位元候補にする。
+pub fn extract_free_fns(root: Node, source: &str) -> Vec<MethodInfo> {
+    let mut out = Vec::new();
+    recurse_free_fns(root, source, &mut out);
+    out
+}
+
+fn recurse_free_fns(node: Node, source: &str, out: &mut Vec<MethodInfo>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            // impl/trait 内のメソッドは extract_impls が担当。降りない。
+            "impl_item" | "trait_item" => {}
+            "function_item" => {
+                if let Some(m) = parse_method(child, source) {
+                    out.push(m);
+                }
+            }
+            _ => recurse_free_fns(child, source, out),
+        }
+    }
+}
+
 fn recurse_impls(node: Node, source: &str, out: &mut Vec<ImplInfo>) {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
