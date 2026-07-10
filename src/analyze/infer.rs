@@ -148,14 +148,18 @@ fn strip_refs(s: &str) -> &str {
 }
 
 fn type_is(s: &str, ty: &str) -> bool {
-    let s = strip_refs(s);
-    if s == "Self" {
+    let s = strip_refs(s).trim();
+    // `Self` と、演算子トレイトが返す `Self::Output` は当該型とみなす。
+    if s == "Self" || s == "Self::Output" {
         return true;
     }
-    if s.contains(['<', '[', '(', ',', ' ']) {
+    // ジェネリック引数を落として基底型名で照合する（`Vector2D<T, U>` → `Vector2D`）。
+    // konpu は型を基底名で扱う（impl_type_name も同様）ので整合する。
+    let base = s.split('<').next().unwrap_or(s).trim();
+    if base.contains(['[', '(', ',', ' ']) {
         return false;
     }
-    s.rsplit("::").next().unwrap_or(s) == ty
+    base.rsplit("::").next().unwrap_or(base) == ty
 }
 
 fn ret_is(m: &MethodInfo, ty: &str) -> bool {
@@ -229,6 +233,20 @@ mod tests {
             method("len", Some(SelfKind::Ref), &[], Some("usize"), false),
         ]);
         assert!(d.is_none());
+    }
+
+    #[test]
+    fn operator_trait_self_output_and_generics() {
+        // impl Add/Neg for Vector<T,U> { fn add(self, other: Self) -> Self::Output; fn neg(self) -> Self::Output }
+        // plus a generic-typed param and a `zero()` -> Vector<T,U>.
+        let d = infer("Vector", vec![
+            method("add", Some(SelfKind::Owned), &["Self"], Some("Self::Output"), false),
+            method("neg", Some(SelfKind::Owned), &[], Some("Self::Output"), false),
+            method("zero", None, &[], Some("Vector<T, U>"), true),
+        ]).unwrap();
+        assert_eq!(d.target_structure, AlgebraicStructure::Group);
+        assert_eq!(d.operation_name, "add");
+        assert_eq!(d.inverse_name.as_deref(), Some("neg"));
     }
 
     #[test]
