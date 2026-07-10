@@ -1,6 +1,7 @@
 pub mod baseline;
 pub mod call_graph;
 pub mod check;
+pub mod directive;
 pub mod extract;
 pub mod extract_kotlin;
 pub mod extract_swift;

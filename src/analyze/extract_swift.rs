@@ -20,13 +20,11 @@ use super::extract::{ImplInfo, MethodInfo, SelfKind};
 
 use super::propagation::{TypeInfo, TypeKind};
 
-use std::collections::HashMap;
-
+use super::directive::{higher_from, parse_directive, structure_from, Directive};
 use super::extract::{
     ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo, UseStatement,
 };
 use super::parser::Language;
-use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
 
 /// Swift ファイル 1 つからバンドルを返す（言語ディスパッチ用）。
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
@@ -42,41 +40,7 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExt
     }
 }
 
-/// `// konpu: head(args)` ディレクティブ。
-struct Directive {
-    head: String,
-    positional: Vec<String>,
-    kwargs: HashMap<String, String>,
-}
-
-/// コメントテキストから konpu ディレクティブを解析。`// konpu:` 以外は None。
-fn parse_directive(comment_text: &str) -> Option<Directive> {
-    let t = comment_text.trim_start_matches('/').trim();
-    let rest = t.strip_prefix("konpu:")?.trim();
-    let (head, argstr) = match rest.find('(') {
-        Some(i) => {
-            let end = rest.rfind(')').unwrap_or(rest.len());
-            (rest[..i].trim(), &rest[i + 1..end])
-        }
-        None => (rest, ""),
-    };
-    let mut positional = Vec::new();
-    let mut kwargs = HashMap::new();
-    for part in argstr.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = part.split_once(':') {
-            kwargs.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
-        } else {
-            positional.push(part.to_string());
-        }
-    }
-    Some(Directive { head: head.to_string(), positional, kwargs })
-}
-
-/// コメント直後の named 宣言（他のコメントは飛ばす）。
+/// コメント直後の named 宣言（他のコメントは飛ばす）。Swift のコメントは `comment`。
 fn following_decl(comment: Node) -> Option<Node> {
     let mut sib = comment.next_named_sibling();
     while let Some(n) = sib {
@@ -109,25 +73,6 @@ fn collect_comments<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
     let mut cur = n.walk();
     for c in n.children(&mut cur) {
         collect_comments(c, out);
-    }
-}
-
-fn structure_from(head: &str) -> Option<AlgebraicStructure> {
-    match head {
-        "monoid" => Some(AlgebraicStructure::Monoid),
-        "group" => Some(AlgebraicStructure::Group),
-        "semigroup" => Some(AlgebraicStructure::Semigroup),
-        "magma" => Some(AlgebraicStructure::Magma),
-        _ => None,
-    }
-}
-
-fn higher_from(value: &str) -> Option<HigherKindedStructure> {
-    match value {
-        "functor" => Some(HigherKindedStructure::Functor),
-        "applicative" => Some(HigherKindedStructure::Applicative),
-        "monad" => Some(HigherKindedStructure::MonadS),
-        _ => None,
     }
 }
 
@@ -590,6 +535,7 @@ fn recurse<F: FnMut(Node)>(n: Node, f: &mut F) {
 mod tests {
     use super::*;
     use crate::analyze::parser;
+    use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
 
     fn impls_of(src: &str) -> Vec<ImplInfo> {
         let tree = parser::parse_with(src, parser::Language::Swift).unwrap();

@@ -17,17 +17,122 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use super::extract::{ImplInfo, MethodInfo, SelfKind};
+use super::directive::{higher_from, parse_directive, structure_from, Directive};
+use super::extract::{
+    ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, ImplInfo, LawTestInfo,
+    MethodInfo, SelfKind,
+};
 use super::propagation::{TypeInfo, TypeKind};
 
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
     super::FileExtract {
+        decls: extract_declarations(root, source, path),
         impls: extract_impls(root, source),
         free_fns: extract_free_fns(root, source),
+        law_tests: extract_law_tests(root, source, path),
+        ignores: extract_ignores(root, source, path),
         type_sites: extract_type_sites(root, source, path),
         type_infos: extract_type_infos(root, source),
         ..super::FileExtract::empty()
     }
+}
+
+/// 全 konpu ディレクティブコメント（Kotlin は `line_comment`）を
+/// (Directive, 直後宣言, 行) で列挙。
+fn directives<'a>(root: Node<'a>, source: &'a str) -> Vec<(Directive, Option<Node<'a>>, usize)> {
+    let mut comments = Vec::new();
+    recurse_nodes(root, "line_comment", &mut comments);
+    comments
+        .into_iter()
+        .filter_map(|n| {
+            parse_directive(text_of(n, source)).map(|d| (d, following_decl(n), n.start_position().row + 1))
+        })
+        .collect()
+}
+
+fn recurse_nodes<'a>(n: Node<'a>, kind: &str, out: &mut Vec<Node<'a>>) {
+    if n.kind() == kind {
+        out.push(n);
+    }
+    let mut cur = n.walk();
+    for c in n.children(&mut cur) {
+        recurse_nodes(c, kind, out);
+    }
+}
+
+fn following_decl(comment: Node) -> Option<Node> {
+    let mut sib = comment.next_named_sibling();
+    while let Some(n) = sib {
+        if n.kind() == "line_comment" {
+            sib = n.next_named_sibling();
+        } else {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// `// konpu: monoid(...)` 等 → 直後の型への宣言。
+pub fn extract_declarations(root: Node, source: &str, path: &Path) -> Vec<AnalyzedDeclaration> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        let Some(structure) = structure_from(&d.head) else { continue };
+        let Some(decl) = decl else { continue };
+        if decl.kind() != "class_declaration" {
+            continue;
+        }
+        let Some(type_name) = type_name(decl, source) else { continue };
+        out.push(AnalyzedDeclaration {
+            target_structure: structure,
+            higher_kinded: d.kwargs.get("higher").and_then(|v| higher_from(v)),
+            type_name,
+            operation_name: d.kwargs.get("op").cloned().unwrap_or_default(),
+            identity_name: d.kwargs.get("identity").cloned(),
+            inverse_name: d.kwargs.get("inverse").cloned(),
+            path: path.to_path_buf(),
+            line,
+            propagation: None,
+        });
+    }
+    out
+}
+
+/// `// konpu: law(...)` → 直後のテスト関数。Kotlin のテストクラスは対象型と別なので
+/// enclosing_type=None（全型に一致）。
+pub fn extract_law_tests(root: Node, source: &str, path: &Path) -> Vec<LawTestInfo> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        if d.head != "law" {
+            continue;
+        }
+        let laws: Vec<_> = d.positional.iter().filter_map(|s| law_from_name(s)).collect();
+        if laws.is_empty() {
+            continue;
+        }
+        let test_fn = decl.and_then(|n| {
+            (n.kind() == "function_declaration")
+                .then(|| first_child_of_kind(n, "identifier").map(|c| text_of(c, source).to_string()))
+                .flatten()
+        });
+        out.push(LawTestInfo { laws, enclosing_type: None, test_fn, path: path.to_path_buf(), line });
+    }
+    out
+}
+
+/// `// konpu: ignore(reason: ..., note: "...")` → IgnoreInfo。
+pub fn extract_ignores(root: Node, source: &str, path: &Path) -> Vec<IgnoreInfo> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        if d.head != "ignore" {
+            continue;
+        }
+        let Some(reason) = d.kwargs.get("reason").and_then(|r| ignore_reason_from_str(r)) else {
+            continue;
+        };
+        let type_name = decl.and_then(|n| (n.kind() == "class_declaration").then(|| type_name(n, source)).flatten());
+        out.push(IgnoreInfo { reason, note: d.kwargs.get("note").cloned(), type_name, path: path.to_path_buf(), line });
+    }
+    out
 }
 
 fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
@@ -288,6 +393,7 @@ fn recurse<F: FnMut(Node)>(n: Node, f: &mut F) {
 mod tests {
     use super::*;
     use crate::analyze::parser;
+    use crate::domain::konpu::AlgebraicStructure;
 
     fn impls_of(src: &str) -> Vec<ImplInfo> {
         let tree = parser::parse_with(src, parser::Language::Kotlin).unwrap();
@@ -323,6 +429,20 @@ mod tests {
         assert_eq!(zero.self_param, None);
         assert!(zero.params.is_empty());
         assert_eq!(zero.return_type.as_deref(), Some("V"));
+    }
+
+    #[test]
+    fn comment_annotation_declares_monoid_and_law() {
+        let src = "// konpu: monoid(op: combine, identity: zero)\nclass Money(val amount: Int)\nclass T {\n  // konpu: law(associativity)\n  fun testAssoc() { }\n}";
+        let tree = parser::parse_with(src, parser::Language::Kotlin).unwrap();
+        let decls = extract_declarations(tree.root_node(), src, Path::new("M.kt"));
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].type_name, "Money");
+        assert_eq!(decls[0].target_structure, AlgebraicStructure::Monoid);
+        assert_eq!(decls[0].operation_name, "combine");
+        let laws = extract_law_tests(tree.root_node(), src, Path::new("M.kt"));
+        assert_eq!(laws.len(), 1);
+        assert_eq!(laws[0].test_fn.as_deref(), Some("testAssoc"));
     }
 
     #[test]

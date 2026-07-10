@@ -220,8 +220,8 @@ pub fn parse_failed_tests(test_output: &str) -> HashSet<String> {
     let mut failed = HashSet::new();
     let mut in_block = false;
     for line in test_output.lines() {
-        // Swift XCTest の失敗行（行単位・state 非依存）。
-        if let Some(name) = swift_failed_test(line) {
+        // Swift XCTest / Kotlin(Gradle) の失敗行（行単位・state 非依存）。
+        if let Some(name) = swift_failed_test(line).or_else(|| kotlin_failed_test(line)) {
             failed.insert(name);
             continue;
         }
@@ -254,6 +254,17 @@ fn swift_failed_test(line: &str) -> Option<String> {
     let inner = line.split('[').nth(1)?.split(']').next()?; // `Module.Class method`
     let method = inner.split_whitespace().last()?;
     (!method.is_empty()).then(|| method.to_string())
+}
+
+/// Kotlin(Gradle) の失敗行からテスト名を取る。
+/// 例: `MoneyTest > combineIsAssociative FAILED` / `... > testAssoc() FAILED` → `combineIsAssociative`。
+fn kotlin_failed_test(line: &str) -> Option<String> {
+    let line = line.trim();
+    let body = line.strip_suffix("FAILED")?.trim_end();
+    // `Class > method` の末尾（複数階層 `Class > Nested > method` にも対応）。
+    let name = body.rsplit(" > ").next()?.trim();
+    let name = name.trim_end_matches("()");
+    (!name.is_empty() && !name.contains(' ')).then(|| name.to_string())
 }
 
 /// 1 つの (宣言, 法則) のテスト状態。
@@ -472,6 +483,18 @@ Test Suite 'MoneyTests' failed";
         let failed = parse_failed_tests(out);
         assert_eq!(failed.len(), 1);
         assert!(failed.contains("testLeftId"));
+    }
+
+    #[test]
+    fn parse_failed_tests_kotlin_gradle_format() {
+        let out = "\
+MoneyTest > combineIsAssociative PASSED
+MoneyTest > zeroIsLeftIdentity FAILED
+MoneyTest > zeroIsRightIdentity() FAILED";
+        let failed = parse_failed_tests(out);
+        assert_eq!(failed.len(), 2);
+        assert!(failed.contains("zeroIsLeftIdentity"));
+        assert!(failed.contains("zeroIsRightIdentity"));
     }
 
     #[test]
