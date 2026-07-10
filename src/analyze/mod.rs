@@ -305,12 +305,14 @@ fn boundary_checks(
             // 逆方向参照の照合方式を言語で切り替える。
             // Rust: `use` パスを `from` パスキーで照合。
             // Swift: `import <Module>` を `from_modules`（モジュール名リスト）で照合。
-            // Swift/Kotlin は import 対象（module / package）を `from_modules` で照合。
+            // Swift/Kotlin は import 対象を `from_modules` で照合。Swift は module 名の
+            // 完全一致、Kotlin は完全修飾 import のパッケージ接頭辞一致（`m` または `m.`）。
             let is_reverse = match u.language {
                 parser::Language::Rust => !from_key.is_empty() && imported_matches(&u.imported_path, &from_key),
-                parser::Language::Swift | parser::Language::Kotlin => {
-                    b.from_modules.iter().any(|m| m == &u.imported_path)
-                }
+                parser::Language::Swift | parser::Language::Kotlin => b
+                    .from_modules
+                    .iter()
+                    .any(|m| &u.imported_path == m || u.imported_path.starts_with(&format!("{m}."))),
             };
             if is_reverse {
                 boundary_violations.push(template::BoundaryViolation {

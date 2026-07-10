@@ -20,8 +20,9 @@ use tree_sitter::Node;
 use super::directive::{higher_from, parse_directive, structure_from, Directive};
 use super::extract::{
     ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, ImplInfo, LawTestInfo,
-    MethodInfo, SelfKind,
+    MethodInfo, SelfKind, UseStatement,
 };
+use super::parser::Language;
 use super::propagation::{TypeInfo, TypeKind};
 
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
@@ -31,10 +32,32 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExt
         free_fns: extract_free_fns(root, source),
         law_tests: extract_law_tests(root, source, path),
         ignores: extract_ignores(root, source, path),
+        uses: extract_use_statements(root, source, path),
         type_sites: extract_type_sites(root, source, path),
         type_infos: extract_type_infos(root, source),
-        ..super::FileExtract::empty()
     }
+}
+
+/// `import a.b.C` を UseStatement として集める。imported_path = 完全修飾名。
+/// 境界検査は Kotlin import を `from_modules`（パッケージ接頭辞）と前方一致で照合。
+pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {
+    let mut out = Vec::new();
+    recurse(root, &mut |n| {
+        if n.kind() == "import" {
+            if let Some(q) = first_child_of_kind(n, "qualified_identifier") {
+                let imported = text_of(q, source).trim().to_string();
+                if !imported.is_empty() {
+                    out.push(UseStatement {
+                        path: path.to_path_buf(),
+                        imported_path: imported,
+                        line: n.start_position().row + 1,
+                        language: Language::Kotlin,
+                    });
+                }
+            }
+        }
+    });
+    out
 }
 
 /// 全 konpu ディレクティブコメント（Kotlin は `line_comment`）を
