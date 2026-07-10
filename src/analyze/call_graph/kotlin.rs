@@ -1,6 +1,6 @@
 //! Kotlin のコールグラフ事実抽出（tree-sitter-kotlin-ng）。
 //!
-//! Swift 版（`call_graph_swift`）と同じく、安定した Kotlin SCIP indexer を前提に
+//! Swift 版（`call_graph::swift`）と同じく、安定した Kotlin SCIP indexer を前提に
 //! できないので konpu が持つ tree-sitter-kotlin-ng で `konpu_cg::Facts` を直接
 //! 構築する。解釈エンジン（`konpu_cg::graph`）は言語中立なので無改変で再利用でき、
 //! 循環/ハブ検出がそのまま効く。
@@ -29,8 +29,8 @@ use tree_sitter::Node;
 
 use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
 
-use super::call_graph::{FnSig, MergeConstruction};
-use super::parser::{self, Language};
+use super::{FnSig, MergeConstruction};
+use crate::analyze::parser::{self, Language};
 
 /// Kotlin プロジェクトから Facts を構築する（外部ツール不要）。
 /// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は

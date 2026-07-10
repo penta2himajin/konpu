@@ -22,8 +22,8 @@ use tree_sitter::Node;
 
 use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
 
-use super::call_graph::{FnSig, MergeConstruction};
-use super::parser::{self, Language};
+use super::{FnSig, MergeConstruction};
+use crate::analyze::parser::{self, Language};
 
 /// Swift プロジェクトから Facts を構築する（外部ツール不要）。
 /// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は

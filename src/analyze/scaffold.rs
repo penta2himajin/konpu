@@ -39,10 +39,10 @@ fn law_pairs(file: &Path, lang: Language) -> Option<(Vec<(String, Law)>, usize)>
     let tree = parser::parse_with(&source, lang)?;
     let root = tree.root_node();
     let decls = match lang {
-        Language::Rust => crate::analyze::extract::extract_declarations(root, &source, file),
-        Language::Swift => crate::analyze::extract_swift::extract_declarations(root, &source, file),
-        Language::Kotlin => crate::analyze::extract_kotlin::extract_declarations(root, &source, file),
-        Language::Ts => crate::analyze::extract_ts::extract_declarations(root, &source, file),
+        Language::Rust => crate::analyze::extract::rust::extract_declarations(root, &source, file),
+        Language::Swift => crate::analyze::extract::swift::extract_declarations(root, &source, file),
+        Language::Kotlin => crate::analyze::extract::kotlin::extract_declarations(root, &source, file),
+        Language::Ts => crate::analyze::extract::ts::extract_declarations(root, &source, file),
     };
     if decls.is_empty() {
         return None;

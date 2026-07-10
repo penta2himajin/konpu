@@ -16,19 +16,19 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use super::extract::{ImplInfo, MethodInfo, SelfKind};
+use super::{ImplInfo, MethodInfo, SelfKind};
 
-use super::propagation::{TypeInfo, TypeKind};
+use crate::analyze::propagation::{TypeInfo, TypeKind};
 
-use super::directive::{higher_from, parse_directive, structure_from, Directive};
-use super::extract::{
+use crate::analyze::directive::{higher_from, parse_directive, structure_from, Directive};
+use super::{
     ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo, UseStatement,
 };
-use super::parser::Language;
+use crate::analyze::parser::Language;
 
 /// Swift ファイル 1 つからバンドルを返す（言語ディスパッチ用）。
-pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
-    super::FileExtract {
+pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze::FileExtract {
+    crate::analyze::FileExtract {
         decls: extract_declarations(root, source, path),
         impls: extract_impls(root, source),
         free_fns: extract_free_fns(root, source),

@@ -18,6 +18,13 @@ use tree_sitter::Node;
 
 use super::parser;
 
+// 言語別の tree-sitter ベース facts 抽出（Swift/Kotlin/TS）。中立エンジンの本体
+// （FnSig / shape / Rust SCIP）はこの mod.rs、grammar 依存の解決器は各言語ファイル。
+#[cfg(feature = "call-graph")]
+pub mod kotlin;
+#[cfg(feature = "call-graph")]
+pub mod swift;
+
 /// ソース中で「値位置で構築される型名」の集合を tree-sitter で抽出する。
 ///
 /// RTA 精緻化 (docs/layer2-call-graph-design.md §6.1): SCIP は構築と型言及を

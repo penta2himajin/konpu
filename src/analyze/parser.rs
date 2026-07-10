@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::{Parser, Tree};
 
-/// 解析対象の言語。抽出器（`extract` / `extract_swift`）の切り替えに使う。
+/// 解析対象の言語。抽出器（`extract::rust` / `extract::swift` …）の切り替えに使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Language {
     Rust,

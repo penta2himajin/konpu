@@ -3,13 +3,6 @@ pub mod call_graph;
 pub mod check;
 pub mod directive;
 pub mod extract;
-pub mod extract_kotlin;
-pub mod extract_swift;
-pub mod extract_ts;
-#[cfg(feature = "call-graph")]
-pub mod call_graph_swift;
-#[cfg(feature = "call-graph")]
-pub mod call_graph_kotlin;
 pub mod infer;
 pub mod parser;
 #[cfg(feature = "call-graph")]
@@ -92,7 +85,7 @@ pub fn analyze_full_with_cg(
     r
 }
 
-/// 1 ファイル分の抽出結果。言語別抽出器（`extract` / `extract_swift`）が返す
+/// 1 ファイル分の抽出結果。言語別抽出器（`extract::rust` / `extract::swift` …）が返す
 /// 共通バンドル。中身はすべて言語非依存のコア構造体。
 pub struct FileExtract {
     pub decls: Vec<extract::AnalyzedDeclaration>,
@@ -189,10 +182,10 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         // 言語別抽出。どちらも同じコア構造体（ImplInfo/MethodInfo/…）を返すので
         // 下流の check/infer/template は言語非依存のまま。
         let e = match lang {
-            parser::Language::Rust => extract::extract_all_file(root, &source, file),
-            parser::Language::Swift => extract_swift::extract_all_file(root, &source, file),
-            parser::Language::Kotlin => extract_kotlin::extract_all_file(root, &source, file),
-            parser::Language::Ts => extract_ts::extract_all_file(root, &source, file),
+            parser::Language::Rust => extract::rust::extract_all_file(root, &source, file),
+            parser::Language::Swift => extract::swift::extract_all_file(root, &source, file),
+            parser::Language::Kotlin => extract::kotlin::extract_all_file(root, &source, file),
+            parser::Language::Ts => extract::ts::extract_all_file(root, &source, file),
         };
         ex.decls.extend(e.decls);
         ex.impls.extend(e.impls);

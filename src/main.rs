@@ -95,14 +95,14 @@ fn run_call_graph_preserve(
     config: &konpu::analyze::template::ResolvedConfig,
 ) -> bool {
     use konpu::analyze::parser::Language;
-    use konpu::analyze::{call_graph, call_graph_kotlin, call_graph_swift, preserve_cg};
+    use konpu::analyze::{call_graph, preserve_cg};
     use konpu::domain::konpu::Severity;
     // Swift/Kotlin プロジェクトは tree-sitter で facts/signatures を構築（SCIP indexer 不要）。
     // それ以外は rust-analyzer/SCIP 経路。
     let ts_lang = cg_ts_language(path);
     let facts = match ts_lang {
-        Some(Language::Swift) => call_graph_swift::facts_from_swift_project(path),
-        Some(Language::Kotlin) => call_graph_kotlin::facts_from_kotlin_project(path),
+        Some(Language::Swift) => call_graph::swift::facts_from_swift_project(path),
+        Some(Language::Kotlin) => call_graph::kotlin::facts_from_kotlin_project(path),
         _ => match call_graph::facts_from_project(path) {
             Ok(f) => f,
             Err(e) => {
@@ -113,8 +113,8 @@ fn run_call_graph_preserve(
     };
     let result = konpu::analyze::analyze_full(path, config);
     let sigs = match ts_lang {
-        Some(Language::Swift) => call_graph_swift::fn_signatures_swift(path),
-        Some(Language::Kotlin) => call_graph_kotlin::fn_signatures_kotlin(path),
+        Some(Language::Swift) => call_graph::swift::fn_signatures_swift(path),
+        Some(Language::Kotlin) => call_graph::kotlin::fn_signatures_kotlin(path),
         _ => call_graph::fn_signatures(path),
     };
     let findings =
@@ -424,10 +424,10 @@ fn main() {
                 Some(f) => facts_from_scip_file(std::path::Path::new(f)),
                 None => match ts_lang {
                     Some(konpu::analyze::parser::Language::Swift) => {
-                        Ok(konpu::analyze::call_graph_swift::facts_from_swift_project(std::path::Path::new(&path)))
+                        Ok(konpu::analyze::call_graph::swift::facts_from_swift_project(std::path::Path::new(&path)))
                     }
                     Some(konpu::analyze::parser::Language::Kotlin) => {
-                        Ok(konpu::analyze::call_graph_kotlin::facts_from_kotlin_project(std::path::Path::new(&path)))
+                        Ok(konpu::analyze::call_graph::kotlin::facts_from_kotlin_project(std::path::Path::new(&path)))
                     }
                     _ => facts_from_project(std::path::Path::new(&path)),
                 },

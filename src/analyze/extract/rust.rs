@@ -2,44 +2,12 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure, Law};
+use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
 
-#[derive(Debug, Clone)]
-pub struct AnalyzedDeclaration {
-    pub target_structure: AlgebraicStructure,
-    pub higher_kinded: Option<HigherKindedStructure>,
-    pub type_name: String,
-    pub operation_name: String,
-    pub identity_name: Option<String>,
-    pub inverse_name: Option<String>,
-    pub path: std::path::PathBuf,
-    pub line: usize,
-    /// 文脈伝播度（Phase 1-B で算出）。未算出なら None。
-    pub propagation: Option<crate::domain::konpu::PropagationSize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SelfKind {
-    Owned,
-    Ref,
-    MutRef,
-    None,
-}
-
-#[derive(Debug, Clone)]
-pub struct MethodInfo {
-    pub name: String,
-    pub self_param: Option<SelfKind>,
-    pub params: Vec<String>,
-    pub return_type: Option<String>,
-    pub is_assoc_fn: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImplInfo {
-    pub type_name: String,
-    pub methods: Vec<MethodInfo>,
-}
+use super::{
+    ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, ImplInfo, LawTestInfo,
+    MethodInfo, SelfKind, UseStatement,
+};
 
 fn text_of(node: Node, source: &str) -> String {
     node.utf8_text(source.as_bytes())
@@ -178,8 +146,8 @@ fn structure_from_attr(attr_text: &str) -> Option<AlgebraicStructure> {
 }
 
 /// Rust ファイル 1 つから全成果物を抽出してバンドルで返す（言語ディスパッチ用）。
-pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
-    super::FileExtract {
+pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze::FileExtract {
+    crate::analyze::FileExtract {
         decls: extract_declarations(root, source, path),
         impls: extract_impls(root, source),
         free_fns: extract_free_fns(root, source),
@@ -187,7 +155,7 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExt
         ignores: extract_ignores(root, source, path),
         uses: extract_use_statements(root, source, path),
         type_sites: extract_type_sites(root, source, path),
-        type_infos: super::propagation::extract_type_infos(root, source),
+        type_infos: crate::analyze::propagation::extract_type_infos(root, source),
     }
 }
 
@@ -287,35 +255,6 @@ fn recurse_collect(
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct LawTestInfo {
-    pub laws: Vec<Law>,
-    pub enclosing_type: Option<String>,
-    /// 直後の `fn` 名。テスト結果（`cargo test` 出力）と突き合わせて
-    /// 通過/不通過を判定するためのキー。抽出できなければ `None`。
-    pub test_fn: Option<String>,
-    pub path: PathBuf,
-    pub line: usize,
-}
-
-pub fn law_from_name(name: &str) -> Option<Law> {
-    match name.trim() {
-        "associativity" => Some(Law::Associativity),
-        "left_identity" => Some(Law::LeftIdentity),
-        "right_identity" => Some(Law::RightIdentity),
-        "inverse_left" => Some(Law::InverseLeft),
-        "inverse_right" => Some(Law::InverseRight),
-        "functor_identity" => Some(Law::FunctorIdentity),
-        "functor_composition" => Some(Law::FunctorComposition),
-        "applicative_identity" => Some(Law::ApplicativeIdentity),
-        "applicative_composition" => Some(Law::ApplicativeComposition),
-        "monad_left_identity" => Some(Law::MonadLeftIdentity),
-        "monad_right_identity" => Some(Law::MonadRightIdentity),
-        "monad_associativity" => Some(Law::MonadAssociativity),
-        _ => None,
-    }
-}
-
 fn enclosing_impl_type(node: Node, source: &str) -> Option<String> {
     let mut cur = node;
     loop {
@@ -411,16 +350,6 @@ fn following_fn_name(attr: Node, source: &str) -> Option<String> {
     None
 }
 
-#[derive(Debug, Clone)]
-pub struct UseStatement {
-    pub path: std::path::PathBuf,
-    /// Rust: `use` のパス（`crate::domain::Money`）。Swift: import したモジュール名。
-    pub imported_path: String,
-    pub line: usize,
-    /// import 元言語。境界検査の照合方式を切り替える（Rust=パスキー、Swift=モジュール名）。
-    pub language: super::parser::Language,
-}
-
 pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {
     let mut out = Vec::new();
     recurse_uses(root, source, path, &mut out);
@@ -447,27 +376,8 @@ fn parse_use(node: Node, source: &str, path: &Path) -> Option<UseStatement> {
         path: path.to_path_buf(),
         imported_path: trimmed.to_string(),
         line,
-        language: super::parser::Language::Rust,
+        language: crate::analyze::parser::Language::Rust,
     })
-}
-
-#[derive(Debug, Clone)]
-pub struct IgnoreInfo {
-    pub reason: crate::domain::konpu::IgnoreReason,
-    pub note: Option<String>,
-    pub type_name: Option<String>,
-    pub path: std::path::PathBuf,
-    pub line: usize,
-}
-
-pub fn ignore_reason_from_str(s: &str) -> Option<crate::domain::konpu::IgnoreReason> {
-    use crate::domain::konpu::IgnoreReason;
-    match s.trim() {
-        "intentional" => Some(IgnoreReason::Intentional),
-        "debt" => Some(IgnoreReason::Debt),
-        "infeasible" => Some(IgnoreReason::Infeasible),
-        _ => None,
-    }
 }
 
 pub fn extract_ignores(root: Node, source: &str, path: &Path) -> Vec<IgnoreInfo> {

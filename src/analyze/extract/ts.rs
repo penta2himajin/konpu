@@ -15,13 +15,13 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use super::directive::{higher_from, parse_directive, structure_from, Directive};
-use super::extract::{
+use crate::analyze::directive::{higher_from, parse_directive, structure_from, Directive};
+use super::{
     ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, ImplInfo, LawTestInfo,
     MethodInfo, SelfKind, UseStatement,
 };
-use super::parser::Language;
-use super::propagation::{TypeInfo, TypeKind};
+use crate::analyze::parser::Language;
+use crate::analyze::propagation::{TypeInfo, TypeKind};
 
 /// 型宣言ノードの種別（class / abstract class / interface / enum）。
 const TYPE_KINDS: &[&str] = &[
@@ -31,8 +31,8 @@ const TYPE_KINDS: &[&str] = &[
     "enum_declaration",
 ];
 
-pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
-    super::FileExtract {
+pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze::FileExtract {
+    crate::analyze::FileExtract {
         decls: extract_declarations(root, source, path),
         impls: extract_impls(root, source),
         free_fns: extract_free_fns(root, source),
