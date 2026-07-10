@@ -326,22 +326,22 @@ konpu check: 法則テストの通過を確認
 - [x] テスト不通過時のエラー出力（`FailingLawTest`）＋ 充足ギャップ G の数値レポート化（`konpu report [--test-results] [--infer]` が per-structure / overall の gap = 1 - passing/required を表示）
 
 #### 1-B：文脈伝播度の計測
-- [ ] 型定義からの構造的サイズ算出（enum → バリアント数、struct → フィールド直積）
-- [ ] 再帰型・コレクション型の∞判定
-- [ ] `max_propagation`設定との比較、超過時のワーニング
+- [x] 型定義からの構造的サイズ算出（enum → バリアント数、struct → フィールド直積）（`src/analyze/propagation.rs`）
+- [x] 再帰型・コレクション型の∞判定（相互再帰も含めて検出、テスト済み）
+- [x] `max_propagation`設定との比較、超過時のワーニング（`check::check_propagation` → `PropagationExceeded`）
 
 #### 1-C：テンプレート設定
-- [ ] `konpu.toml`のパーサー実装
-- [ ] ディレクトリ単位の期待構造マッピング
-- [ ] プリセット（`ddd`, `hexagonal`, `clean`）
-- [ ] ignoreアノテーションの理由分類（`intentional` / `debt` / `infeasible`）
-- [ ] ベースラインモード（`konpu baseline`）
+- [x] `konpu.toml`のパーサー実装（`src/analyze/template/mod.rs`）
+- [x] ディレクトリ単位の期待構造マッピング（`match_layer`、`**`/`*` glob対応）
+- [ ] プリセット（`ddd`, `hexagonal`, `clean`）— **`ddd`のみ実装**。`hexagonal`/`clean`は`preset_layers()`が空リストを返すスタブのまま
+- [x] ignoreアノテーションの理由分類（`intentional` / `debt` / `infeasible`）（`konpu-macros`のproc macroでreason値をバリデーション。`konpu report`が理由別に集計）
+- [x] ベースラインモード（`konpu baseline`）（`src/analyze/baseline.rs`、CLI `Baseline`サブコマンド）
 
 #### 1-D：補助機能
-- [ ] `konpu scaffold` — 法則テストのスケルトン生成（proptest形式）
-- [ ] `konpu report` — コードベース全体の代数的複雑度サマリー出力
+- [x] `konpu scaffold` — 法則テストのスケルトン生成（`src/analyze/scaffold.rs`。Rust/proptest形式に加えSwift(XCTest)/Kotlin(kotlin.test)にも対応）
+- [x] `konpu report` — コードベース全体の代数的複雑度サマリー出力（充足ギャップ、ignore理由別集計、層別期待構造mismatch、境界違反まで出力）
 
-**完了基準：** `konpu.toml`にDDDプリセットを設定し、ドメイン層でモノイド則のテストが欠落している型がワーニングとして報告されること。文脈伝播度の超過が検出されること。
+**完了基準：** `konpu.toml`にDDDプリセットを設定し、ドメイン層でモノイド則のテストが欠落している型がワーニングとして報告されること。文脈伝播度の超過が検出されること。→ 達成（プリセットは`ddd`のみ実装）。
 
 ---
 
@@ -350,9 +350,9 @@ konpu check: 法則テストの通過を確認
 **目的：** アーキテクチャ全体の代数的整合性を検証可能にし、対象言語を拡張する。
 
 #### 2-A：層間制約
-- [ ] `konpu.toml`の`[boundaries]`セクション実装
-- [ ] 「ドメイン層のモノイド則がインフラ層通過後も保存されること」の検査
-- [ ] 層間テストの存在・通過検査
+- [x] `konpu.toml`の`[boundaries]`セクション実装（`from`/`to`/`preserve`/`preserve_severity`/`preserve_checks`）
+- [x] 「ドメイン層のモノイド則がインフラ層通過後も保存されること」の検査（`src/analyze/preserve_cg.rs`。`konpu check --call-graph`、`call-graph` featureが必要）
+- [x] 層間テストの存在・通過検査（`preserve_cg::check_preserve`が`law_tests`を参照して判定。逆方向import違反自体はcall-graph機能なしでも`analyze_full`の`boundary_violations`で検出）
 
 #### 2-B：多言語対応（2言語目 = Swift）
 言語シームを導入（`parser::Language` + `FileExtract`）。解析エンジン（check/infer/
