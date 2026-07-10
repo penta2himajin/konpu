@@ -7,6 +7,8 @@ pub mod extract_kotlin;
 pub mod extract_swift;
 #[cfg(feature = "call-graph")]
 pub mod call_graph_swift;
+#[cfg(feature = "call-graph")]
+pub mod call_graph_kotlin;
 pub mod infer;
 pub mod parser;
 #[cfg(feature = "call-graph")]

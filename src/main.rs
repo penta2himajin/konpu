@@ -94,27 +94,28 @@ fn run_call_graph_preserve(
     path: &std::path::Path,
     config: &konpu::analyze::template::ResolvedConfig,
 ) -> bool {
-    use konpu::analyze::{call_graph, call_graph_swift, preserve_cg};
+    use konpu::analyze::parser::Language;
+    use konpu::analyze::{call_graph, call_graph_kotlin, call_graph_swift, preserve_cg};
     use konpu::domain::konpu::Severity;
-    // Swift プロジェクト（.swift のみ）は tree-sitter で facts/signatures を構築
-    // （SCIP indexer 不要）。それ以外は rust-analyzer/SCIP 経路。
-    let is_swift = is_swift_project(path);
-    let facts = if is_swift {
-        call_graph_swift::facts_from_swift_project(path)
-    } else {
-        match call_graph::facts_from_project(path) {
+    // Swift/Kotlin プロジェクトは tree-sitter で facts/signatures を構築（SCIP indexer 不要）。
+    // それ以外は rust-analyzer/SCIP 経路。
+    let ts_lang = cg_ts_language(path);
+    let facts = match ts_lang {
+        Some(Language::Swift) => call_graph_swift::facts_from_swift_project(path),
+        Some(Language::Kotlin) => call_graph_kotlin::facts_from_kotlin_project(path),
+        _ => match call_graph::facts_from_project(path) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("konpu check --call-graph: {e}");
                 return false;
             }
-        }
+        },
     };
     let result = konpu::analyze::analyze_full(path, config);
-    let sigs = if is_swift {
-        call_graph_swift::fn_signatures_swift(path)
-    } else {
-        call_graph::fn_signatures(path)
+    let sigs = match ts_lang {
+        Some(Language::Swift) => call_graph_swift::fn_signatures_swift(path),
+        Some(Language::Kotlin) => call_graph_kotlin::fn_signatures_kotlin(path),
+        _ => call_graph::fn_signatures(path),
     };
     let findings =
         preserve_cg::check_preserve(&result.declarations, &result.law_tests, config, &facts, &sigs, path);
@@ -163,14 +164,22 @@ fn resolve_config_path(explicit: Option<&str>, analyze_path: &std::path::Path) -
     std::path::PathBuf::from("konpu.toml")
 }
 
-/// `.swift` のみで `.rs` を含まないディレクトリを Swift プロジェクトと判定。
+/// call graph を tree-sitter で構築すべき単一言語（Swift / Kotlin）を判定。
+/// Rust を含む、または複数の非Rust言語が混在する場合は `None`（Rust/SCIP 経路）。
 #[cfg(feature = "call-graph")]
-fn is_swift_project(path: &std::path::Path) -> bool {
+fn cg_ts_language(path: &std::path::Path) -> Option<konpu::analyze::parser::Language> {
     use konpu::analyze::parser::{collect_source_files, Language};
     let files = collect_source_files(path);
+    if files.iter().any(|(_, l)| *l == Language::Rust) {
+        return None;
+    }
     let swift = files.iter().filter(|(_, l)| *l == Language::Swift).count();
-    let rust = files.iter().filter(|(_, l)| *l == Language::Rust).count();
-    swift > 0 && rust == 0
+    let kotlin = files.iter().filter(|(_, l)| *l == Language::Kotlin).count();
+    match (swift, kotlin) {
+        (s, 0) if s > 0 => Some(Language::Swift),
+        (0, k) if k > 0 => Some(Language::Kotlin),
+        _ => None,
+    }
 }
 
 fn main() {
@@ -403,16 +412,25 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            // Swift プロジェクト（.swift のみ）は tree-sitter で Facts を直接構築
-            // （外部ツール不要、instantiated も構築サイトで埋まる）。それ以外は
-            // rust-analyzer/SCIP 経路。--scip 指定時は常に SCIP。
-            let is_swift = scip.is_none() && is_swift_project(std::path::Path::new(&path));
+            // Swift/Kotlin プロジェクトは tree-sitter で Facts を直接構築（外部ツール不要、
+            // instantiated も構築サイトで埋まる）。それ以外は rust-analyzer/SCIP。
+            // --scip 指定時は常に SCIP。
+            let ts_lang = if scip.is_none() {
+                cg_ts_language(std::path::Path::new(&path))
+            } else {
+                None
+            };
             let facts = match &scip {
                 Some(f) => facts_from_scip_file(std::path::Path::new(f)),
-                None if is_swift => {
-                    Ok(konpu::analyze::call_graph_swift::facts_from_swift_project(std::path::Path::new(&path)))
-                }
-                None => facts_from_project(std::path::Path::new(&path)),
+                None => match ts_lang {
+                    Some(konpu::analyze::parser::Language::Swift) => {
+                        Ok(konpu::analyze::call_graph_swift::facts_from_swift_project(std::path::Path::new(&path)))
+                    }
+                    Some(konpu::analyze::parser::Language::Kotlin) => {
+                        Ok(konpu::analyze::call_graph_kotlin::facts_from_kotlin_project(std::path::Path::new(&path)))
+                    }
+                    _ => facts_from_project(std::path::Path::new(&path)),
+                },
             };
             let mut facts = match facts {
                 Ok(f) => f,
@@ -424,8 +442,8 @@ fn main() {
             // RTA: refine the instantiated set to actual construction sites found
             // in the source (tree-sitter), instead of SCIP's "any type reference"
             // which degenerates to CHA. See docs/layer2-call-graph-design.md §6.1.
-            // Swift facts already carry construction sites, so skip the Rust refiner.
-            if prec == Precision::Rta && !is_swift {
+            // Swift/Kotlin facts already carry construction sites, so skip the Rust refiner.
+            if prec == Precision::Rta && ts_lang.is_none() {
                 facts.instantiated =
                     konpu::analyze::call_graph::constructed_types(std::path::Path::new(&path));
             }
