@@ -156,7 +156,45 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze
         uses: extract_use_statements(root, source, path),
         type_sites: extract_type_sites(root, source, path),
         type_infos: crate::analyze::propagation::extract_type_infos(root, source),
+        singletons: extract_singleton_types(root, source),
     }
+}
+
+/// Base type names that appear as the type of a top-level `const`/`static`
+/// (e.g. `pub const ZERO_INSTANCE: Zero = Zero;` → "Zero"). oxidtr renders an
+/// Alloy `one sig` identity this way (unit struct + INSTANCE const), so this
+/// lets konpu resolve `identity = "Zero"` to the singleton value.
+pub fn extract_singleton_types(root: Node, source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    recurse_singleton_types(root, source, &mut out);
+    out
+}
+
+fn recurse_singleton_types(node: Node, source: &str, out: &mut Vec<String>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if matches!(child.kind(), "const_item" | "constant_item" | "static_item") {
+            if let Some(ty) = child.child_by_field_name("type") {
+                if let Some(base) = type_base_name(&text_of(ty, source)) {
+                    out.push(base);
+                }
+            }
+        }
+        recurse_singleton_types(child, source, out);
+    }
+}
+
+/// Strip refs / generics / paths from a type string down to its base identifier.
+fn type_base_name(ty: &str) -> Option<String> {
+    let mut s = ty.trim();
+    while let Some(r) = s.strip_prefix('&') {
+        s = r.trim_start().strip_prefix("mut ").unwrap_or(r.trim_start()).trim_start();
+    }
+    let base = s.split('<').next().unwrap_or(s).trim();
+    if base.is_empty() || base.contains(['[', '(', ',', ' ', '*']) {
+        return None;
+    }
+    Some(base.rsplit("::").next().unwrap_or(base).to_string())
 }
 
 pub fn extract_declarations(

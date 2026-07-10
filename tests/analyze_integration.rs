@@ -27,6 +27,14 @@ fn monoid_valid_no_errors() {
 }
 
 #[test]
+fn monoid_singleton_identity_resolves() {
+    // oxidtr renders an Alloy `one sig` identity as a singleton unit struct +
+    // INSTANCE const (not a nullary fn). konpu must resolve it — no MissingIdentity.
+    let diags = analyze_path(&fixture("monoid_singleton_identity.rs"));
+    assert_eq!(count(&diags, Severity::Error, DiagnosticRule::MissingIdentity), 0);
+}
+
+#[test]
 fn monoid_missing_identity() {
     let diags = analyze_path(&fixture("monoid_missing_identity.rs"));
     assert_eq!(count(&diags, Severity::Error, DiagnosticRule::MissingIdentity), 1);

@@ -35,6 +35,7 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze
         uses: extract_use_statements(root, source, path),
         type_sites: extract_type_sites(root, source, path),
         type_infos: extract_type_infos(root, source),
+        singletons: Vec::new(),
     }
 }
 

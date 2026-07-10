@@ -14,6 +14,7 @@ pub fn check_declaration(
     decl: &AnalyzedDeclaration,
     impls: &[ImplInfo],
     free_fns: &[MethodInfo],
+    singletons: &[String],
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let declaration = AlgebraicDeclaration {
@@ -36,7 +37,7 @@ pub fn check_declaration(
 
     if decl.target_structure.rank() >= 2 {
         let id_name = decl.identity_name.as_deref();
-        if id_name.is_none() || !has_op(&matching, free_fns, id_name.unwrap_or(""), &decl.type_name) {
+        if id_name.is_none() || !has_op(&matching, free_fns, singletons, id_name.unwrap_or(""), &decl.type_name) {
             had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
@@ -48,7 +49,7 @@ pub fn check_declaration(
 
     if decl.target_structure.rank() >= 3 {
         let inv_name = decl.inverse_name.as_deref();
-        if inv_name.is_none() || !has_op(&matching, free_fns, inv_name.unwrap_or(""), &decl.type_name) {
+        if inv_name.is_none() || !has_op(&matching, free_fns, singletons, inv_name.unwrap_or(""), &decl.type_name) {
             had_error = true;
             out.push(Diagnostic {
                 severity: Severity::Error,
@@ -119,10 +120,13 @@ pub fn check_declaration(
     out
 }
 
-/// 単位元/逆元の存在: 型の impl メソッド、または `ty` を返す同名の自由関数。
-/// 後者は oxidtr が receiver なし演算（単位元）を自由関数として出す形に対応する
-/// （infer 側と同じ帰属規則）。
-fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], name: &str, ty: &str) -> bool {
+/// 単位元/逆元の存在:
+/// - 型の impl メソッド、
+/// - `ty` を返す同名の自由関数（oxidtr が receiver なし演算＝単位元を自由関数で出す形）、
+/// - `name` という名のシングルトン型（oxidtr が Alloy `one sig` 単位元を
+///   `struct Zero;` + `const _: Zero = Zero;` で出す形。annotation の identity が
+///   nullary コンストラクタでなく識別値型を指すケース）。
+fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], singletons: &[String], name: &str, ty: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -130,6 +134,7 @@ fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], name: &str, ty: &str) ->
         || free_fns
             .iter()
             .any(|f| f.name == name && ret_base_name(f).as_deref() == Some(ty))
+        || singletons.iter().any(|s| s == name)
 }
 
 /// メソッドの戻り型の基底名（参照・ジェネリクス・パスを剥がす）。

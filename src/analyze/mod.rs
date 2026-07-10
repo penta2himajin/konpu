@@ -97,6 +97,12 @@ pub struct FileExtract {
     pub uses: Vec<extract::UseStatement>,
     pub type_sites: Vec<(String, PathBuf, usize)>,
     pub type_infos: Vec<propagation::TypeInfo>,
+    /// Base type names that have a top-level `const`/`static` instance
+    /// (e.g. `const ZERO_INSTANCE: Zero = Zero;` → "Zero"). These are singleton
+    /// values — how oxidtr renders an Alloy `one sig` used as a monoid identity.
+    /// Used to resolve `identity = "Zero"` when the element is a singleton type
+    /// rather than a nullary constructor. Rust only; empty for other languages.
+    pub singletons: Vec<String>,
 }
 
 impl FileExtract {
@@ -110,6 +116,7 @@ impl FileExtract {
             uses: Vec::new(),
             type_sites: Vec::new(),
             type_infos: Vec::new(),
+            singletons: Vec::new(),
         }
     }
 }
@@ -123,6 +130,9 @@ struct Extracted {
     law_tests: Vec<extract::LawTestInfo>,
     ignores: Vec<extract::IgnoreInfo>,
     uses: Vec<extract::UseStatement>,
+    /// シングルトン型名（`const _: Zero = Zero;` の `Zero`）。oxidtr が Alloy
+    /// `one sig` 単位元を出す形。annotation の identity/inverse 存在検査に使う。
+    singletons: Vec<String>,
 }
 
 /// 実際の解析本体。provider 非依存の従来ロジック。フェーズに分割して各段を委譲する。
@@ -168,6 +178,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         law_tests: Vec::new(),
         ignores: Vec::new(),
         uses: Vec::new(),
+        singletons: Vec::new(),
     };
     let mut type_infos = Vec::new();
     let mut type_sites: std::collections::HashMap<String, (PathBuf, usize)> =
@@ -194,6 +205,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         ex.law_tests.extend(e.law_tests);
         ex.ignores.extend(e.ignores);
         ex.uses.extend(e.uses);
+        ex.singletons.extend(e.singletons);
         type_infos.extend(e.type_infos);
         if infer {
             for (name, path, line) in e.type_sites {
@@ -223,7 +235,7 @@ fn run_diagnostics(
 ) -> Vec<AnalyzedDiagnostic> {
     let mut out: Vec<AnalyzedDiagnostic> = Vec::new();
     for decl in &ex.decls {
-        for diag in check::check_declaration(decl, &ex.impls, &ex.free_fns) {
+        for diag in check::check_declaration(decl, &ex.impls, &ex.free_fns, &ex.singletons) {
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
         for diag in check::check_propagation(decl, config, root) {
