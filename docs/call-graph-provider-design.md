@@ -1,8 +1,7 @@
 # Call Graph Provider — 設計方針
 
-> ステータス：Phase 0（スタブ）・Phase 1（rust-analyzer/SCIP 統合）・Phase 2（CHA→RTA）実装済み。
-> `call-graph` feature 有効時、`konpu callgraph <path>` で循環・ハブを検出できる（Rust のみ。他言語アダプタは未着手）。
-> preserve 検査へのコールグラフ接続は未実装（判定ルール未策定のため保留）。
+> ステータス：Phase 0（スタブ）・Phase 1（rust-analyzer/SCIP 統合）・Phase 2（CHA→RTA）・Phase 3（preserve 接続）実装済み。
+> `call-graph` feature 有効時、`konpu callgraph <path>` で循環・ハブを、`konpu check --call-graph <path>` で preserve を検出できる（Rust のみ。他言語アダプタは未着手）。
 > 関連：`docs/roadmap.md` セクション5 (Phase 2-A)、`docs/layer2-call-graph-design.md`、`docs/layer3-decidability-limits.md`
 
 ## 1. 背景

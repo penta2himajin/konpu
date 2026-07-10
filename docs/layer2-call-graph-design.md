@@ -1,6 +1,6 @@
 # 第2層b：コールグラフトポロジ複雑度 — 設計方針
 
-> ステータス：CHA→RTA を実装済み。rust-analyzer/SCIP で事実抽出、tree-sitter で構築サイトを拾って RTA を精緻化（§6.2）、Tarjan で循環/ハブ検出。`konpu callgraph`（`call-graph` feature）で提供。Konpu 本体（Phase 2-A の preserve）への接続は未実装。
+> ステータス：CHA→RTA を実装済み。rust-analyzer/SCIP で事実抽出、tree-sitter で構築サイトを拾って RTA を精緻化（§6.2）、Tarjan で循環/ハブ検出。`konpu callgraph`（`call-graph` feature）で提供。Konpu 本体（Phase 2-A の preserve）への接続も実装済み（`konpu check --call-graph`、§7）。
 > 関連：`roadmap.md` セクション1（層モデル）、セクション8（保留事項）
 
 ## 1. これは何を測るか
