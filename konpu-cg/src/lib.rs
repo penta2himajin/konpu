@@ -11,7 +11,7 @@ pub mod graph;
 pub mod scip_extract;
 
 pub use facts::{CallSite, CallTargetKind, FuncDef, FuncId, Facts, ImplEntry, TraitMethod};
-pub use graph::{CallGraph, Precision};
+pub use graph::{cycle_is_cross_module, CallGraph, Precision};
 #[cfg(feature = "scip")]
 pub use scip_extract::{facts_from_index, facts_from_project, facts_from_scip_file};
 

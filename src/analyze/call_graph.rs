@@ -4,8 +4,8 @@
 
 #[cfg(feature = "call-graph")]
 pub use konpu_cg::{
-    facts_from_project, facts_from_scip_file, CallGraph, CallGraphProvider, CallTarget, Facts,
-    FuncId, Precision,
+    cycle_is_cross_module, facts_from_project, facts_from_scip_file, CallGraph, CallGraphProvider,
+    CallTarget, Facts, FuncId, Precision,
 };
 
 #[cfg(not(feature = "call-graph"))]

@@ -99,6 +99,19 @@ impl CallGraph {
     }
 }
 
+/// 循環 SCC のメンバーが 2 つ以上のファイルに跨るか。
+///
+/// cross-module（跨ぐ）= 別モジュール間の真の依存もつれで actionable。
+/// intra-module（単一ファイル）= 再帰下降パーサや式木ディスパッチのような
+/// 再帰クラスタで、大抵は設計として正当（良性）。パスをモジュールの代理に使う。
+pub fn cycle_is_cross_module(scc: &[FuncId], facts: &Facts) -> bool {
+    let mut paths = scc.iter().filter_map(|&f| facts.funcs.get(f).map(|d| &d.path));
+    let Some(first) = paths.next() else {
+        return false;
+    };
+    paths.any(|p| p != first)
+}
+
 /// Tarjan の強連結成分分解 (反復スタックで実装)。
 struct Tarjan<'a> {
     g: &'a CallGraph,
@@ -269,6 +282,19 @@ mod tests {
         assert_eq!(cycles.len(), 2);
         assert_eq!(cycles[0], vec![a, b]);
         assert_eq!(cycles[1], vec![s]);
+    }
+
+    #[test]
+    fn cross_vs_intra_module_cycles() {
+        let mut f = Facts::default();
+        // intra: a <-> b, both in one.rs
+        let a = f.add_func("a", "src/one.rs", 1);
+        let b = f.add_func("b", "src/one.rs", 2);
+        // cross: c <-> d, different files
+        let c = f.add_func("c", "src/one.rs", 3);
+        let d = f.add_func("d", "src/two.rs", 1);
+        assert!(!cycle_is_cross_module(&[a, b], &f));
+        assert!(cycle_is_cross_module(&[c, d], &f));
     }
 
     #[test]

@@ -336,21 +336,35 @@ fn main() {
             let hub_threshold = hub_threshold.or(cfg.callgraph_hub_threshold).unwrap_or(8);
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();
+            use konpu::analyze::call_graph::cycle_is_cross_module;
             let cycles = g.cycles();
-            // 相互循環（size>=2 = 別々の関数が輪になった真の循環依存）と
-            // 自己再帰（size==1 = 自分を呼ぶだけの通常の再帰、良性）を分ける。
+            // 循環を3種に分ける（actionable なものだけ前面に）:
+            //  - cross-module cycle: 複数ファイルに跨る真の依存もつれ（要対応）
+            //  - intra-module recursion: 単一ファイル内の相互再帰（再帰下降パーサ等、良性）
+            //  - self-recursion: 自分を呼ぶだけ（良性）
             let (mutual, self_rec): (Vec<_>, Vec<_>) =
                 cycles.into_iter().partition(|scc| scc.len() > 1);
+            let (cross, intra): (Vec<_>, Vec<_>) = mutual
+                .into_iter()
+                .partition(|scc| cycle_is_cross_module(scc, &facts));
             println!("== konpu callgraph ({precision}) ==");
             println!("functions: {}", facts.funcs.len());
             println!("call edges: {edges}");
-            println!(
-                "mutual cycles (circular dependencies): {}",
-                mutual.len()
-            );
-            for scc in &mutual {
+            println!("cross-module cycles (circular dependencies): {}", cross.len());
+            for scc in &cross {
                 let names: Vec<&str> = scc.iter().map(|&f| facts.funcs[f].name.as_str()).collect();
                 println!("  cycle ({}): {}", scc.len(), names.join(" -> "));
+            }
+            println!("intra-module recursion (benign): {}", intra.len());
+            for scc in &intra {
+                let f = scc[0];
+                let names: Vec<&str> = scc.iter().map(|&f| facts.funcs[f].name.as_str()).collect();
+                println!(
+                    "  {} ({} fns) {}",
+                    facts.funcs[f].path.display(),
+                    scc.len(),
+                    names.first().copied().unwrap_or_default()
+                );
             }
             println!("self-recursion (benign): {}", self_rec.len());
             for scc in &self_rec {
