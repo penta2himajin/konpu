@@ -218,7 +218,7 @@ pub(super) fn facts_from_sources(
     lang: Language,
     sources: Vec<(PathBuf, String)>,
     collect_funcs: impl Fn(Node, &str, &Path, &mut Facts, &mut HashMap<usize, FuncId>, &mut Index),
-    collect_calls: impl Fn(Node, &str, &Resolver, &mut Facts),
+    collect_calls: impl Fn(Node, &str, &Path, &Resolver, &mut Facts),
 ) -> Facts {
     let parsed: Vec<(PathBuf, String, tree_sitter::Tree)> = sources
         .into_iter()
@@ -239,9 +239,9 @@ pub(super) fn facts_from_sources(
         collect_funcs(tree.root_node(), src, fpath, &mut facts, &mut ids, &mut index);
         fn_ids.push(ids);
     }
-    for (fi, (_, src, tree)) in parsed.iter().enumerate() {
+    for (fi, (fpath, src, tree)) in parsed.iter().enumerate() {
         let r = Resolver { ids: &fn_ids[fi], index: &index };
-        collect_calls(tree.root_node(), src, &r, &mut facts);
+        collect_calls(tree.root_node(), src, fpath, &r, &mut facts);
     }
     facts
 }

@@ -50,7 +50,7 @@ pub fn facts_from_kotlin_sources(sources: Vec<(std::path::PathBuf, String)>) -> 
         Language::Kotlin,
         sources,
         |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
-        |root, src, r, facts| collect_calls(root, src, r, None, None, facts),
+        |root, src, _, r, facts| collect_calls(root, src, r, None, None, facts),
     )
 }
 
@@ -91,7 +91,10 @@ fn walk_fn_sigs(
             return;
         }
         "function_declaration" => {
-            if let Some(sig) = parse_fn_sig(n, source, path, self_ty, in_companion) {
+            // 拡張関数の暗黙 self は receiver 型（集約シェイプ判定に効く）。
+            let recv = extension_receiver(n, source);
+            let self_eff = recv.as_deref().or(self_ty);
+            if let Some(sig) = parse_fn_sig(n, source, path, self_eff, recv.is_none() && in_companion) {
                 out.push(sig);
             }
             return; // ネスト関数は稀。降りない。
@@ -204,6 +207,21 @@ fn func_name(n: Node, source: &str) -> Option<String> {
     first_child_of_kind(n, "identifier").map(|c| text_of(c, source).trim().to_string())
 }
 
+/// 拡張関数 `fun Recv.name(...)` の receiver 基底型名。関数名 identifier より前に
+/// user_type があればそれ（receiver の identifier は user_type 内にネストするので、
+/// 直下の identifier 探索＝関数名とは衝突しない）。
+fn extension_receiver(n: Node, source: &str) -> Option<String> {
+    let mut cur = n.walk();
+    for c in n.children(&mut cur) {
+        match c.kind() {
+            "identifier" => return None, // 関数名に到達 = receiver 無し
+            "user_type" => return Some(base_type_name(text_of(c, source))),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn collect_funcs(
     n: Node,
     source: &str,
@@ -239,9 +257,43 @@ fn collect_funcs(
             }
             return;
         }
+        // `object X` のメンバは `X.m()` で呼ばれる型メソッド。object は常在
+        // シングルトンなので instantiated にも入れる（RTA で残す）。
+        "object_declaration" => {
+            let ty = type_name(n, source);
+            if let Some(ty) = &ty {
+                facts.instantiated.insert(ty.clone());
+                collect_fields(n, source, ty, index);
+            }
+            if let Some(body) = first_child_of_kind(n, "class_body") {
+                let mut cur = body.walk();
+                for child in body.children(&mut cur) {
+                    collect_funcs(child, source, fpath, ty.as_deref(), facts, ids, index);
+                }
+            }
+            return;
+        }
         "function_declaration" => {
             if let Some(bare) = func_name(n, source) {
-                engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
+                // 拡張関数 `fun Recv.f()` は receiver 型のメソッドとして登録する
+                // （`x.f()` は navigation 呼びなので、free 登録だと External に落ちる）。
+                let recv = extension_receiver(n, source);
+                let encl = recv.as_deref().or(enclosing);
+                engine::register_func(&bare, n, fpath, encl, facts, ids, index);
+            }
+        }
+        // init ブロック / secondary constructor / accessor 付き property も本体を持つ
+        // 呼び出し元。bare 名で登録して caller を与える。
+        "anonymous_initializer" => engine::register_func("init", n, fpath, enclosing, facts, ids, index),
+        "secondary_constructor" => {
+            engine::register_func("constructor", n, fpath, enclosing, facts, ids, index)
+        }
+        "property_declaration"
+            if first_child_of_kind(n, "getter").is_some()
+                || first_child_of_kind(n, "setter").is_some() =>
+        {
+            if let Some(name) = prop_name(n, source) {
+                engine::register_func(&name, n, fpath, enclosing, facts, ids, index);
             }
         }
         _ => {}
@@ -313,12 +365,57 @@ fn collect_calls(
         }
         return;
     }
+    // `object X` のメンバは enclosing=X（bare 呼びは X のメソッドに解決）。
+    if n.kind() == "object_declaration" {
+        let ty = type_name(n, source);
+        if let Some(body) = first_child_of_kind(n, "class_body") {
+            let mut cur = body.walk();
+            for child in body.children(&mut cur) {
+                collect_calls(child, source, r, ty.as_deref(), caller, facts);
+            }
+        }
+        return;
+    }
     // 関数に入ったら caller とローカル変数型を確定して本体を処理。
+    // 拡張関数の本体では暗黙 this = receiver 型。
     if n.kind() == "function_declaration" {
         let c = r.ids.get(&n.id()).copied().or(caller);
+        let recv = extension_receiver(n, source);
+        let encl = recv.as_deref().or(enclosing);
         let locals = build_locals(n, source);
         if let Some(body) = first_child_of_kind(n, "function_body") {
+            resolve_body(body, source, r, encl, &locals, c, facts);
+        }
+        return;
+    }
+    // init ブロック / secondary constructor: 登録済み caller で block を処理。
+    if matches!(n.kind(), "anonymous_initializer" | "secondary_constructor") {
+        let c = r.ids.get(&n.id()).copied().or(caller);
+        let mut locals = build_locals(n, source); // secondary ctor の引数
+        if let Some(body) = first_child_of_kind(n, "block") {
+            collect_locals(body, source, &mut locals);
             resolve_body(body, source, r, enclosing, &locals, c, facts);
+        }
+        return;
+    }
+    // プロパティ宣言: accessor（getter/setter）本体は登録済み caller で、ストアド
+    // 初期化式は caller 無しで walk する（`= Money(...)` 構築を instantiated に拾う）。
+    if n.kind() == "property_declaration" {
+        let c = r.ids.get(&n.id()).copied();
+        let mut walked = false;
+        for acc in ["getter", "setter"] {
+            if let Some(a) = first_child_of_kind(n, acc) {
+                if let Some(body) = first_child_of_kind(a, "function_body") {
+                    let mut locals = HashMap::new();
+                    collect_locals(body, source, &mut locals);
+                    resolve_body(body, source, r, enclosing, &locals, c, facts);
+                    walked = true;
+                }
+            }
+        }
+        if !walked {
+            let locals = HashMap::new();
+            resolve_body(n, source, r, enclosing, &locals, None, facts);
         }
         return;
     }
@@ -572,6 +669,46 @@ mod tests {
         let cid = f.funcs.iter().position(|x| x.name == caller).unwrap();
         let g = CallGraph::build(f, Precision::Cha);
         g.edges[cid].iter().map(|&t| f.funcs[t].name.clone()).collect()
+    }
+
+    #[test]
+    fn extension_fn_registers_as_receiver_method_and_resolves() {
+        // 拡張関数 `fun Money.doubled()` は Money のメソッドとして解決される。
+        // 本体の暗黙 this（bare 呼び）も receiver 型のメソッドに解決される。
+        let f = facts_of(&[(
+            "E.kt",
+            "class Money(val amount: Int) {\n  fun base(): Int { return amount }\n}\nfun Money.doubled(): Int { return base() * 2 }\nclass App {\n  fun run(m: Money) { m.doubled() }\n}",
+        )]);
+        let names: Vec<&str> = f.funcs.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Money.doubled"), "ext fn qualified name: {names:?}");
+        assert!(edges_from(&f, "App.run").contains(&"Money.doubled".to_string()), "receiver call resolves");
+        assert!(edges_from(&f, "Money.doubled").contains(&"Money.base".to_string()), "implicit this in ext body");
+    }
+
+    #[test]
+    fn object_declaration_methods_resolve() {
+        // `object Config` のメソッドは `Config.load()` で呼ばれる。型メソッドとして
+        // 登録され、object は常在シングルトンとして instantiated に入る（RTA 用）。
+        let f = facts_of(&[(
+            "O.kt",
+            "object Config {\n  fun load(): Int { return helper() }\n  fun helper(): Int { return 1 }\n}\nclass App {\n  fun run() { Config.load() }\n}",
+        )]);
+        let names: Vec<&str> = f.funcs.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Config.load"), "object method qualified: {names:?}");
+        assert!(edges_from(&f, "App.run").contains(&"Config.load".to_string()), "Config.load() resolves");
+        assert!(edges_from(&f, "Config.load").contains(&"Config.helper".to_string()), "bare call inside object");
+        assert!(f.instantiated.contains("Config"), "object is a standing singleton");
+    }
+
+    #[test]
+    fn calls_inside_init_blocks_secondary_ctors_and_getters_are_collected() {
+        let f = facts_of(&[(
+            "I.kt",
+            "class Money(val amount: Int) {\n  init { validate() }\n  constructor(s: Int, unused: Int) : this(s) { validate() }\n  val doubled: Int\n    get() { return timesTwo() }\n  fun timesTwo(): Int { return amount }\n  fun validate() {}\n}",
+        )]);
+        assert!(edges_from(&f, "Money.init").contains(&"Money.validate".to_string()), "init block calls");
+        assert!(edges_from(&f, "Money.constructor").contains(&"Money.validate".to_string()), "secondary ctor calls");
+        assert!(edges_from(&f, "Money.doubled").contains(&"Money.timesTwo".to_string()), "getter body calls");
     }
 
     #[test]

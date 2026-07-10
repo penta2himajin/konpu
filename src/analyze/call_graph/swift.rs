@@ -49,7 +49,7 @@ pub fn facts_from_swift_sources(sources: Vec<(std::path::PathBuf, String)>) -> F
         Language::Swift,
         sources,
         |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
-        |root, src, r, facts| collect_calls(root, src, r, None, None, facts),
+        |root, src, _, r, facts| collect_calls(root, src, r, None, None, facts),
     )
 }
 
@@ -248,6 +248,16 @@ fn collect_funcs(
                 engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
             }
         }
+        // init/deinit/subscript も本体を持つ呼び出し元。bare 名で登録して caller を与える。
+        "init_declaration" => engine::register_func("init", n, fpath, enclosing, facts, ids, index),
+        "deinit_declaration" => engine::register_func("deinit", n, fpath, enclosing, facts, ids, index),
+        "subscript_declaration" => engine::register_func("subscript", n, fpath, enclosing, facts, ids, index),
+        // computed property（`var x: T { ... }`）も本体を持つ。プロパティ名で登録。
+        "property_declaration" if first_child_of_kind(n, "computed_property").is_some() => {
+            if let Some(name) = prop_name(n, source) {
+                engine::register_func(&name, n, fpath, enclosing, facts, ids, index);
+            }
+        }
         _ => {}
     }
     let mut cur = n.walk();
@@ -278,11 +288,33 @@ fn collect_calls(
         return;
     }
     // 関数に入ったら caller とローカル変数型を確定して本体を処理。
-    if n.kind() == "function_declaration" {
+    // init/deinit/subscript も同じ扱い（Pass 1 で登録済み。本体は function_body か
+    // computed_property）。
+    if matches!(
+        n.kind(),
+        "function_declaration" | "init_declaration" | "deinit_declaration" | "subscript_declaration"
+    ) {
         let c = r.ids.get(&n.id()).copied().or(caller);
-        let locals = build_locals(n, source);
-        if let Some(body) = first_child_of_kind(n, "function_body") {
+        let mut locals = build_locals(n, source);
+        let body = first_child_of_kind(n, "function_body")
+            .or_else(|| first_child_of_kind(n, "computed_property"));
+        if let Some(body) = body {
+            collect_locals(body, source, &mut locals);
             resolve_body(body, source, r, enclosing, &locals, c, facts);
+        }
+        return;
+    }
+    // プロパティ宣言: computed body は登録済み caller で、ストアド初期化式は
+    // caller 無しで walk する（構築 `= Money(...)` を instantiated に拾うため。
+    // resolve_call は caller 無しでも構築だけは記録する）。
+    if n.kind() == "property_declaration" {
+        let c = r.ids.get(&n.id()).copied();
+        let mut locals = HashMap::new();
+        if let Some(body) = first_child_of_kind(n, "computed_property") {
+            collect_locals(body, source, &mut locals);
+            resolve_body(body, source, r, enclosing, &locals, c, facts);
+        } else {
+            resolve_body(n, source, r, enclosing, &locals, None, facts);
         }
         return;
     }
@@ -476,6 +508,25 @@ mod tests {
     #[test]
     fn construction_populates_instantiated() {
         let f = facts_of(&[("M.swift", "struct M { func go() { let _ = Money(amount: 0) } }")]);
+        assert!(f.instantiated.contains("Money"));
+    }
+
+    #[test]
+    fn calls_inside_init_deinit_subscript_and_computed_properties_are_collected() {
+        let f = facts_of(&[(
+            "M.swift",
+            "struct Money {\n  let amount: Int\n  var doubled: Int { timesTwo() }\n  subscript(i: Int) -> Int { timesTwo() }\n  init(amount: Int) { self.amount = amount; validate() }\n  func timesTwo() -> Int { amount }\n  func validate() {}\n}\nclass Wallet {\n  deinit { cleanup() }\n}\nfunc cleanup() {}",
+        )]);
+        assert!(edges_from(&f, "Money.init").contains(&"Money.validate".to_string()), "init body calls");
+        assert!(edges_from(&f, "Money.doubled").contains(&"Money.timesTwo".to_string()), "computed property body calls");
+        assert!(edges_from(&f, "Money.subscript").contains(&"Money.timesTwo".to_string()), "subscript body calls");
+        assert!(edges_from(&f, "Wallet.deinit").contains(&"cleanup".to_string()), "deinit body calls");
+    }
+
+    #[test]
+    fn stored_property_initializer_construction_populates_instantiated() {
+        // クラスレベルの `var money = Money(amount: 1)` は関数外だが構築サイト。RTA 用に拾う。
+        let f = facts_of(&[("W.swift", "class Wallet {\n  var money = Money(amount: 1)\n}\nstruct Money { let amount: Int }")]);
         assert!(f.instantiated.contains("Money"));
     }
 

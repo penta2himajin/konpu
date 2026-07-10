@@ -11,8 +11,12 @@
 //!   メンバを常に `this.` で修飾するので、受け手は `this.a.foo()` のようにネストする。
 //!   Swift/Kotlin の平坦な受け手解決の代わりに、`resolve_receiver` が
 //!   `this` / ローカル / `this.<field>` / `Type.` を再帰的に型へ解決する。
-//! - TS には callable-value 規約（Swift callAsFunction / Kotlin invoke）が無いので、
-//!   bare 識別子呼び `foo()` は self メソッド → 自由関数 → Dynamic の順で解決する。
+//! - TS には callable-value 規約（Swift callAsFunction / Kotlin invoke）が無く、
+//!   クラスメンバは `this.`/`Type.` 修飾必須なので、bare 識別子呼び `foo()` は
+//!   レキシカルスコープで解決する: 同一ファイルの自由関数（在れば必ずそれ）→
+//!   全ファイルの同名自由関数（import 先の過大近似）→ Dynamic。
+//! - `const f = (…) => …`（トップレベル/ネスト）と class field の関数値も関数として
+//!   登録する（TS の支配的な定義スタイル）。
 //!
 //! 精度モデル（Swift/Kotlin と共通）: 型が解決できたら Static、解決できたが index 外なら
 //! External（エッジ無し）、本当に未解決なら Dynamic（同名全てに繋ぐ過大近似）。
@@ -54,7 +58,7 @@ pub fn facts_from_ts_sources(sources: Vec<(std::path::PathBuf, String)>) -> Fact
         Language::Ts,
         sources,
         |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
-        |root, src, r, facts| collect_calls(root, src, r, None, None, facts),
+        |root, src, fpath, r, facts| collect_calls(root, src, fpath, r, None, None, facts),
     )
 }
 
@@ -219,6 +223,26 @@ fn collect_funcs(
             engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
         }
     }
+    // `const f = (…) => …` / `const f = function () {}` は TS の支配的な関数定義。
+    // ids のキーは関数値ノード（collect_calls/resolve_body が値ノードで引くため）。
+    if n.kind() == "variable_declarator" {
+        if let (Some(name), Some(value)) = (n.child_by_field_name("name"), n.child_by_field_name("value")) {
+            if name.kind() == "identifier" && matches!(value.kind(), "arrow_function" | "function_expression") {
+                let bare = text_of(name, source).trim().to_string();
+                engine::register_func(&bare, value, fpath, enclosing, facts, ids, index);
+            }
+        }
+    }
+    // class field の関数値（`handler = (x) => …`）はそのクラスのメソッド。
+    if n.kind() == "public_field_definition" {
+        if let Some(value) = n.child_by_field_name("value") {
+            if matches!(value.kind(), "arrow_function" | "function_expression") {
+                if let Some(bare) = field_name(n, source) {
+                    engine::register_func(&bare, value, fpath, enclosing, facts, ids, index);
+                }
+            }
+        }
+    }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
         collect_funcs(child, source, fpath, enclosing, facts, ids, index);
@@ -288,6 +312,7 @@ fn field_type(n: Node, source: &str) -> Option<String> {
 fn collect_calls(
     n: Node,
     source: &str,
+    fpath: &Path,
     r: &Resolver,
     enclosing: Option<&str>,
     caller: Option<FuncId>,
@@ -299,7 +324,7 @@ fn collect_calls(
         if let Some(body) = n.child_by_field_name("body") {
             let mut cur = body.walk();
             for child in body.children(&mut cur) {
-                collect_calls(child, source, r, ty.as_deref(), caller, facts);
+                collect_calls(child, source, fpath, r, ty.as_deref(), caller, facts);
             }
         }
         return;
@@ -311,21 +336,40 @@ fn collect_calls(
         let c = r.ids.get(&n.id()).copied().or(caller);
         let locals = build_locals(n, source);
         if let Some(body) = n.child_by_field_name("body") {
-            resolve_body(body, source, r, enclosing, &locals, c, facts);
+            resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
+        }
+        return;
+    }
+    // 変数/フィールドの初期化式: 関数値なら登録済み caller で本体を処理、
+    // 非関数なら caller 無しで walk して構築 `new T(...)` を instantiated に拾う。
+    if matches!(n.kind(), "variable_declarator" | "public_field_definition") {
+        if let Some(v) = n.child_by_field_name("value") {
+            if matches!(v.kind(), "arrow_function" | "function_expression") {
+                let c = r.ids.get(&v.id()).copied().or(caller);
+                let locals = build_locals(v, source);
+                if let Some(body) = v.child_by_field_name("body") {
+                    resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
+                }
+            } else {
+                let locals = HashMap::new();
+                resolve_body(v, source, fpath, r, enclosing, &locals, None, facts);
+            }
         }
         return;
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_calls(child, source, r, enclosing, caller, facts);
+        collect_calls(child, source, fpath, r, enclosing, caller, facts);
     }
 }
 
 /// 関数本体（アロー関数含む）の呼び出しを解決してエッジ化。ネストした named 関数は
 /// それ自身の caller で再入する。`new T(...)` は instantiated を埋める。
+#[allow(clippy::too_many_arguments)] // 文脈スレッディング。構造体化は間接化が勝るだけ。
 fn resolve_body(
     n: Node,
     source: &str,
+    fpath: &Path,
     r: &Resolver,
     enclosing: Option<&str>,
     locals: &HashMap<String, String>,
@@ -334,8 +378,18 @@ fn resolve_body(
 ) {
     match n.kind() {
         "function_declaration" => {
-            collect_calls(n, source, r, enclosing, caller, facts);
+            collect_calls(n, source, fpath, r, enclosing, caller, facts);
             return;
+        }
+        // ネストした `const g = () => …`（Pass 1 で登録済み）は g 自身の caller で再入。
+        "variable_declarator" => {
+            let is_registered_fn = n.child_by_field_name("value").is_some_and(|v| {
+                matches!(v.kind(), "arrow_function" | "function_expression") && r.ids.contains_key(&v.id())
+            });
+            if is_registered_fn {
+                collect_calls(n, source, fpath, r, enclosing, caller, facts);
+                return;
+            }
         }
         "new_expression" => {
             if let Some(ty) = new_type(n, source) {
@@ -343,13 +397,13 @@ fn resolve_body(
             }
         }
         "call_expression" => {
-            resolve_call(n, source, r.index, enclosing, locals, caller, facts);
+            resolve_call(n, source, fpath, r.index, enclosing, locals, caller, facts);
         }
         _ => {}
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        resolve_body(child, source, r, enclosing, locals, caller, facts);
+        resolve_body(child, source, fpath, r, enclosing, locals, caller, facts);
     }
 }
 
@@ -397,9 +451,11 @@ fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
 }
 
 /// call_expression を解決してエッジを facts に足す。
+#[allow(clippy::too_many_arguments)]
 fn resolve_call(
     call: Node,
     source: &str,
+    fpath: &Path,
     index: &Index,
     enclosing: Option<&str>,
     locals: &HashMap<String, String>,
@@ -409,10 +465,11 @@ fn resolve_call(
     let Some(func) = call.child_by_field_name("function") else { return };
 
     let resolved: Resolution = match func.kind() {
-        // bare 呼び `foo()`: self メソッド → 自由関数 → Dynamic。
-        // TS はインスタンスメンバを `this.` で修飾するので、bare は自由関数/インポート
-        // が主。PascalCase でも構築は `new`（別ノード）なのでここでは構築扱いしない。
-        "identifier" => engine::resolve_bare(index, enclosing, text_of(func, source).trim()),
+        // bare 呼び `foo()`: TS はレキシカルスコープ＝クラスメンバは `this.`/`Type.`
+        // 修飾必須なので enclosing は見ない。同一ファイルの自由関数が在れば必ずそれ
+        // （import はファイル内定義に負ける）。無ければ全ファイルの同名（import 先の
+        // 過大近似、健全）。PascalCase 構築は `new`（別ノード）なのでここでは扱わない。
+        "identifier" => resolve_bare_ts(index, facts, text_of(func, source).trim(), fpath),
         // メンバ呼び `recv.method()`。
         "member_expression" => {
             let Some(prop) = func.child_by_field_name("property") else { return };
@@ -427,6 +484,16 @@ fn resolve_call(
     };
 
     engine::push_resolution(resolved, caller, facts);
+}
+
+/// TS の bare 呼び解決: 同一ファイルの自由関数優先 → 全ファイル → Dynamic。
+fn resolve_bare_ts(index: &Index, facts: &Facts, name: &str, file: &Path) -> Resolution {
+    if let Some(ids) = index.free_funcs.get(name) {
+        let local: Vec<FuncId> =
+            ids.iter().copied().filter(|&i| facts.funcs[i].path == file).collect();
+        return Resolution::Targets(if local.is_empty() { ids.clone() } else { local });
+    }
+    Resolution::Dynamic(name.to_string())
 }
 
 /// 受け手式の型を再帰的に解決する。TS の `this.a.foo()` のようなネスト参照に対応:
@@ -542,6 +609,78 @@ mod tests {
         let cid = f.funcs.iter().position(|x| x.name == caller).unwrap();
         let g = CallGraph::build(f, Precision::Cha);
         g.edges[cid].iter().map(|&t| f.funcs[t].name.clone()).collect()
+    }
+
+    #[test]
+    fn arrow_const_functions_register_and_collect_calls() {
+        // `const f = (…) => …` は TS の支配的な関数定義スタイル。関数として登録し、
+        // 本体の呼び出しも f を caller としてエッジ化する。
+        let f = facts_of(&[(
+            "a.ts",
+            "export const add = (a: number): number => free(a);\nexport function free(x: number): number { return x; }\nexport function user(): number { return add(1); }",
+        )]);
+        let names: Vec<&str> = f.funcs.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"add"), "arrow const registered: {names:?}");
+        assert!(edges_from(&f, "add").contains(&"free".to_string()), "calls inside arrow body");
+        assert!(edges_from(&f, "user").contains(&"add".to_string()), "call to arrow const resolves");
+    }
+
+    #[test]
+    fn nested_arrow_const_gets_its_own_caller() {
+        // 関数本体内の `const g = () => …` は外側でなく g 自身の caller でエッジ化。
+        let f = facts_of(&[(
+            "n.ts",
+            "export function outer(): void {\n  const g = (): number => free(1);\n  g();\n}\nexport function free(x: number): number { return x; }",
+        )]);
+        assert!(edges_from(&f, "g").contains(&"free".to_string()), "nested arrow body attributed to g");
+        assert!(edges_from(&f, "outer").contains(&"g".to_string()), "outer calls g");
+    }
+
+    #[test]
+    fn class_field_arrow_registers_as_method() {
+        let f = facts_of(&[(
+            "s.ts",
+            "class Svc {\n  handler = (x: number) => this.helper(x);\n  helper(x: number): number { return x; }\n  run(): void { this.handler(1); }\n}",
+        )]);
+        let names: Vec<&str> = f.funcs.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Svc.handler"), "field arrow registered: {names:?}");
+        assert!(edges_from(&f, "Svc.handler").contains(&"Svc.helper".to_string()), "this.helper in field arrow");
+        assert!(edges_from(&f, "Svc.run").contains(&"Svc.handler".to_string()), "this.handler(1) resolves");
+    }
+
+    #[test]
+    fn field_and_toplevel_initializer_new_populates_instantiated() {
+        let f = facts_of(&[(
+            "w.ts",
+            "class Wallet {\n  money = new Money(1);\n}\nclass Money { constructor(readonly amount: number) {} }\nconst top = new Wallet();",
+        )]);
+        assert!(f.instantiated.contains("Money"), "field initializer construction");
+        assert!(f.instantiated.contains("Wallet"), "top-level initializer construction");
+    }
+
+    #[test]
+    fn bare_call_prefers_same_file_free_fn() {
+        // fp-ts 型のモジュール構成: 各ファイルが同名 export（map 等）を持つ。
+        // bare 呼びはレキシカルスコープなので同一ファイル定義のみに結ぶ。
+        let f = facts_of(&[
+            ("Option.ts", "export const map = (x: number): number => x;\nexport const use1 = (): number => map(1);"),
+            ("Arr.ts", "export const map = (x: number): number => x;"),
+        ]);
+        let cid = f.funcs.iter().position(|x| x.name == "use1").unwrap();
+        let g = CallGraph::build(&f, Precision::Cha);
+        let target_paths: Vec<&std::path::Path> =
+            g.edges[cid].iter().map(|&t| f.funcs[t].path.as_path()).collect();
+        assert_eq!(target_paths, vec![std::path::Path::new("Option.ts")], "same-file map only");
+
+        // 同一ファイルに定義が無い bare 呼びは全ファイルの同名へ（import 先の過大近似）。
+        let f2 = facts_of(&[
+            ("A.ts", "export const map = (x: number): number => x;"),
+            ("B.ts", "export const map = (x: number): number => x;"),
+            ("C.ts", "export const go = (): number => map(1);"),
+        ]);
+        let cid2 = f2.funcs.iter().position(|x| x.name == "go").unwrap();
+        let g2 = CallGraph::build(&f2, Precision::Cha);
+        assert_eq!(g2.edges[cid2].len(), 2, "no local def → all same-name candidates");
     }
 
     #[test]
