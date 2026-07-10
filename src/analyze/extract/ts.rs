@@ -32,16 +32,144 @@ const TYPE_KINDS: &[&str] = &[
 ];
 
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> crate::analyze::FileExtract {
+    let mut impls = extract_impls(root, source);
+    let mut type_sites = extract_type_sites(root, source, path);
+    // 関数型エンコーディングの代数インスタンス（`const M: Monoid<T> = { concat, empty }`）も
+    // クラスと同じ ImplInfo/type_site として足す → 既存の推論経路がそのまま Semigroup/Monoid を導く。
+    for (impl_info, site) in extract_instances(root, source, path) {
+        impls.push(impl_info);
+        type_sites.push(site);
+    }
     crate::analyze::FileExtract {
         decls: extract_declarations(root, source, path),
-        impls: extract_impls(root, source),
+        impls,
         free_fns: extract_free_fns(root, source),
         law_tests: extract_law_tests(root, source, path),
         ignores: extract_ignores(root, source, path),
         uses: extract_use_statements(root, source, path),
-        type_sites: extract_type_sites(root, source, path),
+        type_sites,
         type_infos: extract_type_infos(root, source),
     }
+}
+
+/// 関数型の代数インスタンスを ImplInfo + type_site として抽出する。
+///
+/// fp-ts 系の型クラスは `interface Semigroup<A> { concat: (x: A, y: A) => A }` を
+/// クラスでなく **const オブジェクト**で実装する: `const M: Monoid<number> = { concat, empty }`。
+/// これを「const 名を carrier 型とみなした ImplInfo」に正規化する（op/identity の型は
+/// const 名に揃える）。intentional なトリガとして型注釈が `Semigroup`/`Monoid`/`Group` を
+/// 名指すものだけ拾う（任意オブジェクトの誤検出を避ける）。構造（Semigroup/Monoid/Group）
+/// は注釈ではなく実際の op/identity の有無から infer が導く。
+fn extract_instances(root: Node, source: &str, path: &Path) -> Vec<(ImplInfo, (String, PathBuf, usize))> {
+    let mut out = Vec::new();
+    recurse(root, &mut |n| {
+        if n.kind() != "variable_declarator" {
+            return;
+        }
+        let Some(name_node) = n.child_by_field_name("name") else { return };
+        if name_node.kind() != "identifier" {
+            return;
+        }
+        let Some(ann) = n.child_by_field_name("type") else { return };
+        if algebra_interface(ann, source).is_none() {
+            return;
+        }
+        let Some(obj) = n.child_by_field_name("value") else { return };
+        if obj.kind() != "object" {
+            return;
+        }
+        let name = text_of(name_node, source).trim().to_string();
+        let methods = object_methods(obj, source, &name);
+        if methods.is_empty() {
+            return;
+        }
+        let line = n.start_position().row + 1;
+        out.push((
+            ImplInfo { type_name: name.clone(), methods },
+            (name, path.to_path_buf(), line),
+        ));
+    });
+    out
+}
+
+/// type_annotation が代数型クラス（`Semigroup`/`Monoid`/`Group`、`Se.Semigroup` 等の
+/// 修飾も可）を名指していればその基底名を返す。
+fn algebra_interface<'a>(ann: Node, source: &'a str) -> Option<&'a str> {
+    let inner = first_named_child(ann)?;
+    let base = match inner.kind() {
+        "generic_type" => {
+            let name = inner.child_by_field_name("name")?;
+            match name.kind() {
+                "type_identifier" => text_of(name, source),
+                // `Se.Semigroup<..>` → nested_type_identifier の name 側。
+                "nested_type_identifier" => text_of(name.child_by_field_name("name")?, source),
+                _ => return None,
+            }
+        }
+        "type_identifier" => text_of(inner, source),
+        _ => return None,
+    };
+    matches!(base.trim(), "Semigroup" | "Monoid" | "Group").then_some(base.trim())
+}
+
+/// オブジェクトリテラルのプロパティを MethodInfo に正規化する（型は inst 名に揃える）。
+/// arrow の引数数で op/inverse/identity を作り分ける（族名照合は infer 側に任せる）。
+fn object_methods(obj: Node, source: &str, inst: &str) -> Vec<MethodInfo> {
+    let mut methods = Vec::new();
+    let mut cur = obj.walk();
+    for child in obj.children(&mut cur) {
+        // `key: value`（pair）と メソッド短縮 `key(...) {}`（method_definition）の両対応。
+        let (key, arity) = match child.kind() {
+            "pair" => {
+                let Some(k) = child.child_by_field_name("key") else { continue };
+                if k.kind() != "property_identifier" {
+                    continue;
+                }
+                let Some(value) = child.child_by_field_name("value") else { continue };
+                (text_of(k, source).trim().to_string(), value_arity(value))
+            }
+            "method_definition" => {
+                let Some(k) = child.child_by_field_name("name") else { continue };
+                (text_of(k, source).trim().to_string(), param_count(child))
+            }
+            _ => continue,
+        };
+        methods.push(MethodInfo {
+            name: key,
+            self_param: None,
+            // 引数・戻り型を inst 名に正規化（carrier が builtin/外部型でも推論に乗せる）。
+            params: vec![inst.to_string(); arity],
+            return_type: Some(inst.to_string()),
+            is_assoc_fn: true,
+        });
+    }
+    methods
+}
+
+/// プロパティ値ノードから演算の項数を推定する。
+/// - 関数リテラル（arrow / function）→ 実際の仮引数数（正確）。
+/// - データリテラル（数値/文字列/配列/オブジェクト等）→ 0（単位元候補）。
+/// - 参照（`SemigroupSum.concat` / 識別子 / 呼び出し）→ 関数エイリアスとみなし 2（二項演算）。
+///   fp-ts の Monoid は `concat: SemigroupX.concat` と別インスタンスの演算を借用するため。
+///   非族名プロパティを 2 と誤っても infer は族名でしか op を拾わないので無害。
+fn value_arity(value: Node) -> usize {
+    match value.kind() {
+        "arrow_function" | "function_expression" => param_count(value),
+        // データリテラル = 0 引数（単位元）。
+        "number" | "string" | "template_string" | "true" | "false" | "null" | "array"
+        | "object" | "unary_expression" | "regex" => 0,
+        // 参照・呼び出し等 = 関数エイリアス（二項演算の借用）とみなす。
+        _ => 2,
+    }
+}
+
+/// arrow/function/method の仮引数の数（required + optional）。
+fn param_count(fn_node: Node) -> usize {
+    let Some(fps) = fn_node.child_by_field_name("parameters") else { return 0 };
+    let mut cur = fps.walk();
+    fps.children(&mut cur)
+        .filter(|p| matches!(p.kind(), "required_parameter" | "optional_parameter"))
+        .count()
 }
 
 /// `import ... from "module"` を UseStatement として集める。imported_path = モジュール指定子。
@@ -199,6 +327,11 @@ pub fn extract_ignores(root: Node, source: &str, path: &Path) -> Vec<IgnoreInfo>
         out.push(IgnoreInfo { reason, note: d.kwargs.get("note").cloned(), type_name, path: path.to_path_buf(), line });
     }
     out
+}
+
+fn first_named_child(n: Node) -> Option<Node> {
+    let mut cur = n.walk();
+    n.children(&mut cur).find(|c| c.is_named())
 }
 
 fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
@@ -516,5 +649,73 @@ mod tests {
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].imported_path, "./domain/money");
         assert_eq!(uses[0].language, Language::Ts);
+    }
+
+    fn instances_of(src: &str) -> Vec<ImplInfo> {
+        let tree = parser::parse_with(src, parser::Language::Ts).unwrap();
+        extract_instances(tree.root_node(), src, Path::new("m.ts"))
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn functional_monoid_instance_becomes_impl() {
+        // fp-ts 風: interface + const インスタンス。const 名を carrier とみなし、
+        // concat=二項演算(2引数)、empty=単位元(0引数) を inst 名の型に正規化。
+        let src = "export const monoidSum: Monoid<number> = { concat: (x, y) => x + y, empty: 0 };";
+        let impls = instances_of(src);
+        let m = impls.iter().find(|i| i.type_name == "monoidSum").unwrap();
+        let concat = m.methods.iter().find(|m| m.name == "concat").unwrap();
+        assert_eq!(concat.self_param, None);
+        assert!(concat.is_assoc_fn);
+        assert_eq!(concat.params, vec!["monoidSum".to_string(), "monoidSum".to_string()]);
+        assert_eq!(concat.return_type.as_deref(), Some("monoidSum"));
+        let empty = m.methods.iter().find(|m| m.name == "empty").unwrap();
+        assert!(empty.params.is_empty());
+        assert_eq!(empty.return_type.as_deref(), Some("monoidSum"));
+    }
+
+    #[test]
+    fn functional_instance_infers_monoid_end_to_end() {
+        use crate::analyze::infer::infer_declarations;
+        let src = "export const monoidSum: Monoid<number> = { concat: (x, y) => x + y, empty: 0 };";
+        let tree = parser::parse_with(src, parser::Language::Ts).unwrap();
+        let root = tree.root_node();
+        let impls = extract_instances(root, src, Path::new("m.ts"));
+        let (impl_infos, sites): (Vec<_>, Vec<_>) = impls.into_iter().unzip();
+        let type_sites: std::collections::HashMap<String, (std::path::PathBuf, usize)> =
+            sites.into_iter().map(|(n, p, l)| (n, (p, l))).collect();
+        let decls = infer_declarations(&impl_infos, &[], &type_sites, &std::collections::HashSet::new());
+        let d = decls.iter().find(|d| d.type_name == "monoidSum").unwrap();
+        assert_eq!(d.target_structure, AlgebraicStructure::Monoid);
+        assert_eq!(d.operation_name, "concat");
+        assert_eq!(d.identity_name.as_deref(), Some("empty"));
+    }
+
+    #[test]
+    fn semigroup_instance_without_empty_is_semigroup() {
+        let src = "const S: Se.Semigroup<string> = { concat: (x, y) => x + y };";
+        let impls = instances_of(src);
+        assert!(impls.iter().any(|i| i.type_name == "S")); // 修飾 `Se.Semigroup` も拾う
+    }
+
+    #[test]
+    fn aliased_concat_is_still_binary_op() {
+        // fp-ts の Monoid は op を別インスタンスから借用する: `concat: SemigroupSum.concat`。
+        // 参照値でも二項演算とみなし、`empty: 0`（リテラル）を単位元にして Monoid に届く。
+        let src = "export const MonoidSum: Monoid<number> = { concat: SemigroupSum.concat, empty: 0 };";
+        let m = &instances_of(src)[0];
+        let concat = m.methods.iter().find(|m| m.name == "concat").unwrap();
+        assert_eq!(concat.params.len(), 2); // 参照でも 2 引数
+        let empty = m.methods.iter().find(|m| m.name == "empty").unwrap();
+        assert_eq!(empty.params.len(), 0); // リテラルは 0 引数
+    }
+
+    #[test]
+    fn plain_object_without_algebra_annotation_ignored() {
+        // 型注釈が代数型クラスを名指さないオブジェクトは拾わない（誤検出回避）。
+        let src = "const cfg = { concat: (x, y) => x + y, empty: 0 };";
+        assert!(instances_of(src).is_empty());
     }
 }
