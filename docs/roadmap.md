@@ -374,8 +374,10 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
   `companion object` の `fun zero()`/`val zero`→単位元）、`// konpu:` コメント注釈
   （共有 `directive` モジュール）、law + `--test-results`（Gradle `Class > test FAILED`）、
   compliance、propagation（List/Set/Map/`T?` 正規化）、scaffold（kotlin.test）、
-  逆import境界（完全修飾 import を `from_modules` 接頭辞照合）。
-  残: call graph（layer 2b、Swift版から移植中）。
+  逆import境界（完全修飾 import を `from_modules` 接頭辞照合）、
+  call graph（layer 2b: 循環/ハブ + preserve B/C、`call_graph_kotlin` に精密解決移植）。
+  **Kotlin は Swift と完全同等**（layer-3 + layer-2b）。CLI は `cg_ts_language` で
+  Rust/SCIP・Swift・Kotlin を 3-way 判定。
 - [ ] TypeScript（4言語目以降）
 
 #### 2-C：oxidtr正式連携
