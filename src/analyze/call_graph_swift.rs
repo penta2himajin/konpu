@@ -22,14 +22,20 @@ use tree_sitter::Node;
 
 use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
 
+use super::call_graph::{FnSig, MergeConstruction};
 use super::parser::{self, Language};
 
 /// Swift プロジェクトから Facts を構築する（外部ツール不要）。
+/// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は
+/// SCIP 同様に相対パス前提のため）。
 pub fn facts_from_swift_project(path: &Path) -> Facts {
     let sources: Vec<_> = parser::collect_source_files(path)
         .into_iter()
         .filter(|(_, l)| *l == Language::Swift)
-        .filter_map(|(f, _)| std::fs::read_to_string(&f).ok().map(|s| (f, s)))
+        .filter_map(|(f, _)| {
+            let rel = f.strip_prefix(path).unwrap_or(&f).to_path_buf();
+            std::fs::read_to_string(&f).ok().map(|s| (rel, s))
+        })
         .collect();
     facts_from_swift_sources(sources)
 }
@@ -61,6 +67,165 @@ pub fn facts_from_swift_sources(sources: Vec<(std::path::PathBuf, String)>) -> F
         collect_calls(tree.root_node(), src, &fn_ids[fi], None, &mut facts);
     }
     facts
+}
+
+/// Swift プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
+/// 集約シェイプ判定（`is_aggregation_shape`）は末尾セグメント + `[T]`/`<T>` 照合で
+/// Swift 型文字列をそのまま扱えるので正規化不要。
+pub fn fn_signatures_swift(path: &Path) -> Vec<FnSig> {
+    let mut out = Vec::new();
+    for (f, lang) in parser::collect_source_files(path) {
+        if lang != Language::Swift {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Some(tree) = parser::parse_with(&src, Language::Swift) else { continue };
+        walk_fn_sigs(tree.root_node(), &src, &f, None, &mut out);
+    }
+    out
+}
+
+fn walk_fn_sigs(n: Node, source: &str, path: &Path, self_ty: Option<&str>, out: &mut Vec<FnSig>) {
+    match n.kind() {
+        "class_declaration" => {
+            let ty = decl_keyword(n, source).and_then(|kw| decl_type_name(n, source, &kw));
+            let body = first_child_of_kind(n, "class_body")
+                .or_else(|| first_child_of_kind(n, "enum_class_body"));
+            if let Some(body) = body {
+                let mut cur = body.walk();
+                for child in body.children(&mut cur) {
+                    walk_fn_sigs(child, source, path, ty.as_deref(), out);
+                }
+            }
+            return;
+        }
+        "function_declaration" => {
+            if let Some(sig) = parse_fn_sig(n, source, path, self_ty) {
+                out.push(sig);
+            }
+            return; // ネスト関数は稀。降りない。
+        }
+        _ => {}
+    }
+    let mut cur = n.walk();
+    for child in n.children(&mut cur) {
+        walk_fn_sigs(child, source, path, self_ty, out);
+    }
+}
+
+fn parse_fn_sig(n: Node, source: &str, path: &Path, self_ty: Option<&str>) -> Option<FnSig> {
+    let name = func_name(n, source)?;
+    let is_static = has_static(n, source);
+    let mut params = Vec::new();
+    let mut params_named = Vec::new();
+    let mut ret = None;
+    let mut cur = n.walk();
+    for c in n.children(&mut cur) {
+        match c.kind() {
+            "parameter" => {
+                if let Some(ty) = param_type(c, source) {
+                    if let Some(id) = param_name(c, source) {
+                        params_named.push((id, ty.clone()));
+                    }
+                    params.push(ty);
+                }
+            }
+            "user_type" | "optional_type" | "tuple_type" | "array_type" | "dictionary_type" => {
+                ret = Some(text_of(c, source).trim().to_string());
+            }
+            _ => {}
+        }
+    }
+    let mut constructions = Vec::new();
+    if let Some(body) = first_child_of_kind(n, "function_body") {
+        collect_constructions(body, source, &mut constructions);
+    }
+    Some(FnSig {
+        path: path.to_path_buf(),
+        line: n.start_position().row + 1,
+        // インスタンスメソッドは暗黙 self がその型。static/自由関数は self 無し。
+        self_type: if is_static { None } else { self_ty.map(str::to_string) },
+        name,
+        params,
+        params_named,
+        ret,
+        constructions,
+    })
+}
+
+fn has_static(n: Node, source: &str) -> bool {
+    first_child_of_kind(n, "modifiers").is_some_and(|m| {
+        let mut cur = m.walk();
+        m.children(&mut cur).any(|c| matches!(text_of(c, source).trim(), "static" | "class"))
+    })
+}
+
+/// パラメータの型テキスト。
+fn param_type(n: Node, source: &str) -> Option<String> {
+    let mut cur = n.walk();
+    n.children(&mut cur)
+        .find(|c| matches!(c.kind(), "user_type" | "optional_type" | "tuple_type" | "array_type" | "dictionary_type"))
+        .map(|c| text_of(c, source).trim().to_string())
+}
+
+/// パラメータの内部名（`_ other: T` → other、`items: T` → items）。最後の simple_identifier。
+fn param_name(n: Node, source: &str) -> Option<String> {
+    let mut cur = n.walk();
+    n.children(&mut cur)
+        .filter(|c| c.kind() == "simple_identifier")
+        .last()
+        .map(|c| text_of(c, source).trim().to_string())
+}
+
+/// 本体内の `Type(...)` 構築サイト（検出器 C）。refs = 引数式が参照する基底識別子。
+fn collect_constructions(n: Node, source: &str, out: &mut Vec<MergeConstruction>) {
+    if n.kind() == "call_expression" {
+        if let Some(first) = {
+            let mut cur = n.walk();
+            n.children(&mut cur).find(|c| c.is_named())
+        } {
+            if first.kind() == "simple_identifier" {
+                let ty = text_of(first, source).trim().to_string();
+                if is_pascal_case(&ty) {
+                    let mut refs = Vec::new();
+                    if let Some(args) = first_child_of_kind(n, "call_suffix") {
+                        collect_base_idents(args, source, &mut refs);
+                    }
+                    out.push(MergeConstruction { type_name: ty, line: n.start_position().row + 1, refs });
+                }
+            }
+        }
+    }
+    let mut cur = n.walk();
+    for child in n.children(&mut cur) {
+        collect_constructions(child, source, out);
+    }
+}
+
+/// 式木の基底識別子（`a.x` → "a"、`self`）を重複なく集める。引数ラベルと
+/// navigation の末尾（.x）は除く。
+fn collect_base_idents(n: Node, source: &str, out: &mut Vec<String>) {
+    match n.kind() {
+        // 引数ラベル `amount:` と navigation の末尾 `.amount` は参照ではない。降りない。
+        "value_argument_label" | "navigation_suffix" => return,
+        "self_expression" => {
+            if !out.iter().any(|s| s == "self") {
+                out.push("self".to_string());
+            }
+            return;
+        }
+        "simple_identifier" => {
+            let t = text_of(n, source).trim().to_string();
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        _ => {}
+    }
+    let mut cur = n.walk();
+    for child in n.children(&mut cur) {
+        collect_base_idents(child, source, out);
+    }
 }
 
 fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
@@ -266,6 +431,38 @@ mod tests {
         ]);
         let g = CallGraph::build(&f, Precision::Cha);
         assert_eq!(g.cycles().iter().filter(|c| c.len() == 2).count(), 1);
+    }
+
+    fn sigs_of(files: &[(&str, &str)]) -> Vec<FnSig> {
+        // write to a temp dir so fn_signatures_swift (path-based) can read them.
+        let dir = std::env::temp_dir().join(format!("konpu_cgsw_sig_{}", files.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, src) in files {
+            std::fs::write(dir.join(name), src).unwrap();
+        }
+        let out = fn_signatures_swift(&dir);
+        for (name, _) in files {
+            std::fs::remove_file(dir.join(name)).ok();
+        }
+        std::fs::remove_dir(&dir).ok();
+        out
+    }
+
+    #[test]
+    fn fn_sig_aggregation_and_construction() {
+        use crate::analyze::call_graph::is_aggregation_shape;
+        let sigs = sigs_of(&[(
+            "R.swift",
+            "struct R {\n  func total(_ items: [Money]) -> Money { Money(amount: 0) }\n  func describe(_ a: Money, _ b: Money) -> String { let m = Money(amount: a.amount + b.amount); return \"x\" }\n}",
+        )]);
+        let total = sigs.iter().find(|s| s.name == "total").unwrap();
+        assert!(is_aggregation_shape(total, "Money")); // [Money] -> Money
+        let describe = sigs.iter().find(|s| s.name == "describe").unwrap();
+        // C: constructs Money referencing two Money params a, b.
+        let c = describe.constructions.iter().find(|c| c.type_name == "Money").unwrap();
+        assert!(c.refs.contains(&"a".to_string()));
+        assert!(c.refs.contains(&"b".to_string()));
+        assert_eq!(describe.self_type, Some("R".to_string()));
     }
 
     #[test]

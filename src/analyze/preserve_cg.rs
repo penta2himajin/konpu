@@ -199,16 +199,22 @@ fn resolve_method(facts: &Facts, ty: &str, method: &str) -> Vec<FuncId> {
         .collect()
 }
 
-/// SCIP 名の末尾メソッド名（`impl#[T][Tr]combine` → `combine`, `total` → `total`）。
-fn method_name(scip_name: &str) -> &str {
-    let after_bracket = scip_name.rsplit(']').next().unwrap_or(scip_name);
-    after_bracket.rsplit('/').next().unwrap_or(after_bracket)
+/// 末尾メソッド名。SCIP `impl#[T][Tr]combine` → `combine`、Swift `Money.combine` →
+/// `combine`、自由関数 `total` → `total`。
+fn method_name(name: &str) -> &str {
+    let after_bracket = name.rsplit(']').next().unwrap_or(name);
+    let after_slash = after_bracket.rsplit('/').next().unwrap_or(after_bracket);
+    // Swift のドット修飾名の末尾を取る（SCIP 名にドットは無いので無害）。
+    after_slash.rsplit('.').next().unwrap_or(after_slash)
 }
 
-/// SCIP 名の impl 対象型（`impl#[Money][Tr]combine` → `Money`）。無ければ None。
-fn for_type_of(scip_name: &str) -> Option<&str> {
-    let idx = scip_name.find("impl#[")?;
-    scip_name[idx + "impl#[".len()..].split(']').next()
+/// impl 対象型。SCIP `impl#[Money][Tr]combine` → `Money`、Swift `Money.combine` →
+/// `Money`。自由関数（型修飾なし）は None。
+fn for_type_of(name: &str) -> Option<&str> {
+    if let Some(idx) = name.find("impl#[") {
+        return name[idx + "impl#[".len()..].split(']').next();
+    }
+    name.rsplit_once('.').map(|(head, _)| head)
 }
 
 /// FnSig（tree-sitter）を Facts の FuncId に結合する。パス末尾一致 + メソッド名一致、

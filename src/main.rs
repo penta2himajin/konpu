@@ -94,17 +94,28 @@ fn run_call_graph_preserve(
     path: &std::path::Path,
     config: &konpu::analyze::template::ResolvedConfig,
 ) -> bool {
-    use konpu::analyze::{call_graph, preserve_cg};
+    use konpu::analyze::{call_graph, call_graph_swift, preserve_cg};
     use konpu::domain::konpu::Severity;
-    let facts = match call_graph::facts_from_project(path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("konpu check --call-graph: {e}");
-            return false;
+    // Swift プロジェクト（.swift のみ）は tree-sitter で facts/signatures を構築
+    // （SCIP indexer 不要）。それ以外は rust-analyzer/SCIP 経路。
+    let is_swift = is_swift_project(path);
+    let facts = if is_swift {
+        call_graph_swift::facts_from_swift_project(path)
+    } else {
+        match call_graph::facts_from_project(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("konpu check --call-graph: {e}");
+                return false;
+            }
         }
     };
     let result = konpu::analyze::analyze_full(path, config);
-    let sigs = call_graph::fn_signatures(path);
+    let sigs = if is_swift {
+        call_graph_swift::fn_signatures_swift(path)
+    } else {
+        call_graph::fn_signatures(path)
+    };
     let findings =
         preserve_cg::check_preserve(&result.declarations, &result.law_tests, config, &facts, &sigs, path);
     if findings.is_empty() {
