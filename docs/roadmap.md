@@ -397,6 +397,16 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
   言語別実装は `extract/ts.rs` + `call_graph/ts.rs` のみ、解析エンジンは無改変。
   CLI は `cg_ts_language` で Rust/SCIP・Swift・Kotlin・TS を 4-way 判定。
 
+#### 2-D：モジュール依存グラフ（layer 2a）
+- [x] `konpu modulegraph <dir>` — ディレクトリ粒度の import 依存グラフ。純構文解析（`use`/
+  `import` 抽出）なので call-graph feature 不要。循環依存（Tarjan SCC）+ 結合ハブ（fan-in/out）を報告。
+  `src/analyze/module_graph.rs`。エッジ = 「A のファイルが B に解決される import」、自己ループは除外。
+  解決は best-effort: Rust（`crate::a::b::Item` を `a/b.rs`/`mod.rs` へサフィックス照合、`self`/`super`
+  は mod.rs と通常ファイルの意味論差も処理）、TS（相対 import + ESM `.js` 指定子を `.ts` へ）。
+  konpu.toml の exclude 尊重、hub_threshold は `[callgraph]` を流用。検証: konpu 自身で
+  `analyze ⇄ call_graph ⇄ extract`、zod v3 で `root ⇄ helpers ⇄ locales` を検出。
+- [ ] Swift/Kotlin: モジュール名 import はディレクトリに素直に落ちないので、別途言語別方式を検討（未対応）。
+
 #### 2-C：oxidtr正式連携
 - [ ] oxidtrが生成するコードへのKonpuアノテーション自動付与
 - [ ] oxidtrが生成する法則テストへの`#[konpu::law]`自動付与
