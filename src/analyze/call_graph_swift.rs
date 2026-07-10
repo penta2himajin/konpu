@@ -442,6 +442,10 @@ fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
 fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
     if n.kind() == "property_declaration" {
         if let Some(name) = prop_name(n, source) {
+            // ponytail: 型は注釈 `let x: T` か構築 `let x = T(...)` からのみ拾う。
+            // `let x = foo()`（call 戻り値）や chain `a.b()` はローカルが無型のまま残り、
+            // その受け手 `x.m()` は resolve_call で Dynamic に落ちる（残差の主因）。
+            // 精密化するなら Index に (型,メソッド)→戻り型 を持たせ戻り型伝播する。
             if let Some(t) = prop_type(n, source) {
                 out.insert(name, base_type_name(&t));
             }
