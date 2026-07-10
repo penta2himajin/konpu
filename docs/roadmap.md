@@ -369,7 +369,11 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
 - [x] 境界の逆方向 import 検査（module→層マッピング）: `[boundaries.*].from_modules` に
   `from` 層の Swift モジュール名を宣言。`to` パスのファイルがそのモジュールを import したら違反。
   `UseStatement.language` で Rust（パスキー照合）と Swift（モジュール名照合）を切替。**Swift は境界も含めフルパリティ**。
-- [ ] Kotlin / TypeScript（3言語目以降。シームは整備済み）
+- [~] Kotlin（3言語目、tree-sitter-kotlin-ng）: 推論スライス実装済み
+  （class/data class/interface/object→型、`operator fun plus`→add / `times`→mul、
+  `companion object` の `fun zero()`/`val zero`→単位元、propagation の List/Set/Map/`T?` 正規化）。
+  残: `// konpu:` コメント注釈（Swift と共有モジュール化）・law/`--test-results`・call graph。
+- [ ] TypeScript（4言語目以降）
 
 #### 2-C：oxidtr正式連携
 - [ ] oxidtrが生成するコードへのKonpuアノテーション自動付与
