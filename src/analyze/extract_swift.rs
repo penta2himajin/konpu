@@ -23,8 +23,9 @@ use super::propagation::{TypeInfo, TypeKind};
 use std::collections::HashMap;
 
 use super::extract::{
-    ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo,
+    ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo, UseStatement,
 };
+use super::parser::Language;
 use crate::domain::konpu::{AlgebraicStructure, HigherKindedStructure};
 
 /// Swift ファイル 1 つからバンドルを返す（言語ディスパッチ用）。
@@ -35,7 +36,7 @@ pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExt
         free_fns: extract_free_fns(root, source),
         law_tests: extract_law_tests(root, source, path),
         ignores: extract_ignores(root, source, path),
-        uses: Vec::new(), // Swift の import は層別制約に未使用（MVP）
+        uses: extract_use_statements(root, source, path),
         type_sites: extract_type_sites(root, source, path),
         type_infos: extract_type_infos(root, source),
     }
@@ -409,6 +410,28 @@ fn synthetic_conformance_methods(protos: &[String], ty: &str) -> Vec<MethodInfo>
     out
 }
 
+/// `import <Module>` を UseStatement として集める。imported_path = モジュール名。
+/// 境界検査は Swift import を `from_modules`（モジュール名リスト）と照合する。
+pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {
+    let mut out = Vec::new();
+    recurse(root, &mut |n| {
+        if n.kind() == "import_declaration" {
+            if let Some(id) = first_child_of_kind(n, "identifier") {
+                let module = text_of(id, source).trim().to_string();
+                if !module.is_empty() {
+                    out.push(UseStatement {
+                        path: path.to_path_buf(),
+                        imported_path: module,
+                        line: n.start_position().row + 1,
+                        language: Language::Swift,
+                    });
+                }
+            }
+        }
+    });
+    out
+}
+
 /// トップレベル（型/extension の外）の自由関数。戻り型で型に帰属させ単位元候補にする。
 pub fn extract_free_fns(root: Node, source: &str) -> Vec<MethodInfo> {
     let mut out = Vec::new();
@@ -753,6 +776,16 @@ mod tests {
         assert_eq!(ig.len(), 1);
         assert_eq!(ig[0].note.as_deref(), Some("order matters"));
         assert_eq!(ig[0].type_name.as_deref(), Some("Discounts"));
+    }
+
+    #[test]
+    fn imports_extracted_as_module_uses() {
+        let src = "import Foundation\nimport DomainKit\n@testable import InfraKit\nstruct S {}";
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        let uses = extract_use_statements(tree.root_node(), src, Path::new("S.swift"));
+        let mods: Vec<&str> = uses.iter().map(|u| u.imported_path.as_str()).collect();
+        assert_eq!(mods, vec!["Foundation", "DomainKit", "InfraKit"]);
+        assert!(uses.iter().all(|u| u.language == parser::Language::Swift));
     }
 
     #[test]

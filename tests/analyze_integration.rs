@@ -291,3 +291,30 @@ fn boundary_preserve_violation_when_to_loses_monoid_rank() {
     std::fs::remove_file(&to_path).ok();
     std::fs::remove_dir(&dir).ok();
 }
+
+#[test]
+fn swift_reverse_import_boundary_via_from_modules() {
+    use konpu::analyze::analyze_full;
+    use konpu::analyze::template;
+    // A `to`-layer Swift file importing a `from`-layer module (by module→layer
+    // mapping) is a reverse-dependency violation.
+    let dir = std::env::temp_dir().join("konpu_swift_boundary_test");
+    let domain = dir.join("Domain");
+    std::fs::create_dir_all(&domain).unwrap();
+    let money = domain.join("Money.swift");
+    std::fs::write(&money, "import Foundation\nimport InfraKit\nstruct Money { let amount: Int }\n").unwrap();
+    let cfg = template::parse(
+        "[boundaries.no_infra_in_domain]\nfrom = \"Infra/**\"\nfrom_modules = [\"InfraKit\"]\nto = \"Domain/**\"\n",
+    );
+    let result = analyze_full(&dir, &cfg);
+    assert!(
+        result.boundary_violations.iter().any(|v| v.imported_path == "InfraKit"),
+        "expected a reverse-import violation for InfraKit, got: {:?}",
+        result.boundary_violations
+    );
+    // Foundation is not a `from` module → must not violate.
+    assert!(!result.boundary_violations.iter().any(|v| v.imported_path == "Foundation"));
+    std::fs::remove_file(&money).ok();
+    std::fs::remove_dir(&domain).ok();
+    std::fs::remove_dir(&dir).ok();
+}

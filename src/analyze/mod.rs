@@ -294,10 +294,17 @@ fn boundary_checks(
         let from_key = from_pattern_key(&b.from_pattern);
         for u in &ex.uses {
             let caller_path = u.path.clone();
-            if !glob_match_path(&b.to_pattern, &caller_path, root) || from_key.is_empty() {
+            if !glob_match_path(&b.to_pattern, &caller_path, root) {
                 continue;
             }
-            if imported_matches(&u.imported_path, &from_key) {
+            // 逆方向参照の照合方式を言語で切り替える。
+            // Rust: `use` パスを `from` パスキーで照合。
+            // Swift: `import <Module>` を `from_modules`（モジュール名リスト）で照合。
+            let is_reverse = match u.language {
+                parser::Language::Rust => !from_key.is_empty() && imported_matches(&u.imported_path, &from_key),
+                parser::Language::Swift => b.from_modules.iter().any(|m| m == &u.imported_path),
+            };
+            if is_reverse {
                 boundary_violations.push(template::BoundaryViolation {
                     boundary_name: b.name.clone(),
                     from_path: caller_path.clone(),

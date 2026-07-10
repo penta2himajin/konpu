@@ -37,6 +37,10 @@ pub struct LayerExpectationMismatch {
 pub struct Boundary {
     pub from: Option<String>,
     pub to: Option<String>,
+    /// Swift 用: `from` 層を構成するモジュール名。`to` パス内のファイルが
+    /// これらを import したら逆方向参照＝違反。Rust は `from` パスキーで照合するため不要。
+    #[serde(default)]
+    pub from_modules: Vec<String>,
     #[serde(default)]
     pub preserve: Vec<String>,
     /// preserve 検査の深刻度: "off" | "warn" | "error"（既定 warn）。
@@ -89,6 +93,8 @@ pub struct ResolvedBoundary {
     pub name: String,
     pub from_pattern: String,
     pub to_pattern: String,
+    /// Swift の逆方向 import 検査用: `from` 層のモジュール名。
+    pub from_modules: Vec<String>,
     pub preserve: Vec<AlgebraicStructure>,
     pub preserve_severity: PreserveSeverity,
     pub preserve_checks: PreserveChecks,
@@ -269,6 +275,7 @@ pub fn parse(text: &str) -> ResolvedConfig {
             name,
             from_pattern: from,
             to_pattern: to,
+            from_modules: b.from_modules,
             preserve: parse_structures(&b.preserve),
             preserve_severity: PreserveSeverity::parse(b.preserve_severity.as_deref()),
             preserve_checks: PreserveChecks::parse(b.preserve_checks.as_deref()),

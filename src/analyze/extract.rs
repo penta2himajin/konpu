@@ -414,8 +414,11 @@ fn following_fn_name(attr: Node, source: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct UseStatement {
     pub path: std::path::PathBuf,
+    /// Rust: `use` のパス（`crate::domain::Money`）。Swift: import したモジュール名。
     pub imported_path: String,
     pub line: usize,
+    /// import 元言語。境界検査の照合方式を切り替える（Rust=パスキー、Swift=モジュール名）。
+    pub language: super::parser::Language,
 }
 
 pub fn extract_use_statements(root: Node, source: &str, path: &Path) -> Vec<UseStatement> {
@@ -444,6 +447,7 @@ fn parse_use(node: Node, source: &str, path: &Path) -> Option<UseStatement> {
         path: path.to_path_buf(),
         imported_path: trimmed.to_string(),
         line,
+        language: super::parser::Language::Rust,
     })
 }
 
