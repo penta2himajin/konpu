@@ -31,14 +31,16 @@ use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
 
 use super::{FnSig, MergeConstruction};
 use crate::analyze::parser::{self, Language};
+use crate::analyze::template::ResolvedConfig;
 
 /// Kotlin プロジェクトから Facts を構築する（外部ツール不要）。
 /// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は
 /// SCIP 同様に相対パス前提のため）。
-pub fn facts_from_kotlin_project(path: &Path) -> Facts {
+pub fn facts_from_kotlin_project(path: &Path, config: &ResolvedConfig) -> Facts {
     let sources: Vec<_> = parser::collect_source_files(path)
         .into_iter()
         .filter(|(_, l)| *l == Language::Kotlin)
+        .filter(|(f, _)| !config.is_excluded(f, path))
         .filter_map(|(f, _)| {
             let rel = f.strip_prefix(path).unwrap_or(&f).to_path_buf();
             std::fs::read_to_string(&f).ok().map(|s| (rel, s))
@@ -105,10 +107,10 @@ fn base_type_name(s: &str) -> String {
 }
 
 /// Kotlin プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
-pub fn fn_signatures_kotlin(path: &Path) -> Vec<FnSig> {
+pub fn fn_signatures_kotlin(path: &Path, config: &ResolvedConfig) -> Vec<FnSig> {
     let mut out = Vec::new();
     for (f, lang) in parser::collect_source_files(path) {
-        if lang != Language::Kotlin {
+        if lang != Language::Kotlin || config.is_excluded(&f, path) {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(&f) else { continue };
@@ -715,7 +717,7 @@ mod tests {
         for (name, src) in files {
             std::fs::write(dir.join(name), src).unwrap();
         }
-        let out = fn_signatures_kotlin(&dir);
+        let out = fn_signatures_kotlin(&dir, &ResolvedConfig::empty());
         for (name, _) in files {
             std::fs::remove_file(dir.join(name)).ok();
         }

@@ -101,9 +101,9 @@ fn run_call_graph_preserve(
     // それ以外は rust-analyzer/SCIP 経路。
     let ts_lang = cg_ts_language(path);
     let facts = match ts_lang {
-        Some(Language::Swift) => call_graph::swift::facts_from_swift_project(path),
-        Some(Language::Kotlin) => call_graph::kotlin::facts_from_kotlin_project(path),
-        Some(Language::Ts) => call_graph::ts::facts_from_ts_project(path),
+        Some(Language::Swift) => call_graph::swift::facts_from_swift_project(path, config),
+        Some(Language::Kotlin) => call_graph::kotlin::facts_from_kotlin_project(path, config),
+        Some(Language::Ts) => call_graph::ts::facts_from_ts_project(path, config),
         _ => match call_graph::facts_from_project(path) {
             Ok(f) => f,
             Err(e) => {
@@ -114,9 +114,9 @@ fn run_call_graph_preserve(
     };
     let result = konpu::analyze::analyze_full(path, config);
     let sigs = match ts_lang {
-        Some(Language::Swift) => call_graph::swift::fn_signatures_swift(path),
-        Some(Language::Kotlin) => call_graph::kotlin::fn_signatures_kotlin(path),
-        Some(Language::Ts) => call_graph::ts::fn_signatures_ts(path),
+        Some(Language::Swift) => call_graph::swift::fn_signatures_swift(path, config),
+        Some(Language::Kotlin) => call_graph::kotlin::fn_signatures_kotlin(path, config),
+        Some(Language::Ts) => call_graph::ts::fn_signatures_ts(path, config),
         _ => call_graph::fn_signatures(path),
     };
     let findings =
@@ -425,17 +425,19 @@ fn main() {
             } else {
                 None
             };
+            // konpu.toml を先に読む（facts の exclude と hub_threshold の両方に使う）。
+            let cfg = konpu::analyze::template::load(&std::path::Path::new(&path).join("konpu.toml"));
             let facts = match &scip {
                 Some(f) => facts_from_scip_file(std::path::Path::new(f)),
                 None => match ts_lang {
                     Some(konpu::analyze::parser::Language::Swift) => {
-                        Ok(konpu::analyze::call_graph::swift::facts_from_swift_project(std::path::Path::new(&path)))
+                        Ok(konpu::analyze::call_graph::swift::facts_from_swift_project(std::path::Path::new(&path), &cfg))
                     }
                     Some(konpu::analyze::parser::Language::Kotlin) => {
-                        Ok(konpu::analyze::call_graph::kotlin::facts_from_kotlin_project(std::path::Path::new(&path)))
+                        Ok(konpu::analyze::call_graph::kotlin::facts_from_kotlin_project(std::path::Path::new(&path), &cfg))
                     }
                     Some(konpu::analyze::parser::Language::Ts) => {
-                        Ok(konpu::analyze::call_graph::ts::facts_from_ts_project(std::path::Path::new(&path)))
+                        Ok(konpu::analyze::call_graph::ts::facts_from_ts_project(std::path::Path::new(&path), &cfg))
                     }
                     _ => facts_from_project(std::path::Path::new(&path)),
                 },
@@ -456,7 +458,6 @@ fn main() {
                     konpu::analyze::call_graph::constructed_types(std::path::Path::new(&path));
             }
             // ハブ閾値: CLI flag > konpu.toml [callgraph].hub_threshold > 既定 8。
-            let cfg = konpu::analyze::template::load(&std::path::Path::new(&path).join("konpu.toml"));
             let hub_threshold = hub_threshold.or(cfg.callgraph_hub_threshold).unwrap_or(8);
             let g = CallGraph::build(&facts, prec);
             let edges: usize = g.edges.iter().map(|s| s.len()).sum();

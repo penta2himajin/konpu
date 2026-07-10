@@ -26,16 +26,19 @@ use konpu_cg::{CallSite, CallTargetKind, Facts, FuncId, ImplEntry, TraitMethod};
 
 use super::{FnSig, MergeConstruction};
 use crate::analyze::parser::{self, Language};
+use crate::analyze::template::ResolvedConfig;
 
 /// 型宣言ノード（class / abstract class）。interface/enum は呼び出し本体を持たないので対象外。
 const CLASS_KINDS: &[&str] = &["class_declaration", "abstract_class_declaration"];
 
 /// TS プロジェクトから Facts を構築する（外部ツール不要）。
+/// `config.exclude`（konpu.toml）に一致するファイルは除外する（テスト等をハブ集計から外す）。
 /// パスはプロジェクトルート相対で格納する（preserve の `to`/`from` glob は相対パス前提）。
-pub fn facts_from_ts_project(path: &Path) -> Facts {
+pub fn facts_from_ts_project(path: &Path, config: &ResolvedConfig) -> Facts {
     let sources: Vec<_> = parser::collect_source_files(path)
         .into_iter()
         .filter(|(_, l)| *l == Language::Ts)
+        .filter(|(f, _)| !config.is_excluded(f, path))
         .filter_map(|(f, _)| {
             let rel = f.strip_prefix(path).unwrap_or(&f).to_path_buf();
             std::fs::read_to_string(&f).ok().map(|s| (rel, s))
@@ -102,10 +105,11 @@ fn base_type_name(s: &str) -> String {
 }
 
 /// TS プロジェクトの全関数シグネチャ（preserve 検査 B/C 用）。
-pub fn fn_signatures_ts(path: &Path) -> Vec<FnSig> {
+/// `config.exclude` に一致するファイルは除外する（facts と対象集合を揃える）。
+pub fn fn_signatures_ts(path: &Path, config: &ResolvedConfig) -> Vec<FnSig> {
     let mut out = Vec::new();
     for (f, lang) in parser::collect_source_files(path) {
-        if lang != Language::Ts {
+        if lang != Language::Ts || config.is_excluded(&f, path) {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(&f) else { continue };
@@ -653,7 +657,7 @@ mod tests {
         for (name, src) in files {
             std::fs::write(dir.join(name), src).unwrap();
         }
-        let out = fn_signatures_ts(&dir);
+        let out = fn_signatures_ts(&dir, &ResolvedConfig::empty());
         for (name, _) in files {
             std::fs::remove_file(dir.join(name)).ok();
         }
