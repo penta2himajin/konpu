@@ -381,9 +381,11 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
 - [x] TypeScript（4言語目、tree-sitter-typescript）: layer-3 フルパリティ。
   推論（class/abstract class/interface/enum、演算子オーバーロード無しなので名前付き
   `combine`/`merge`、`static zero()` / `static readonly zero: T`→単位元＝Kotlin companion 相当。
-  **関数型エンコーディングも対応**: fp-ts 風 `const M: Monoid<T> = { concat, empty }`（interface +
-  const インスタンス）を const 名を carrier とみなした ImplInfo に正規化し、既存 infer 経路で
-  Semigroup/Monoid/Group を導く。実 fp-ts で 21 インスタンス検出）、
+  **関数型エンコーディングも対応**: fp-ts 風 const オブジェクト `const M: Monoid<T> = { concat, empty }`
+  に加え、**factory スタイル**（Effect 風 `const min = (O): Semigroup<A> => make(...)`、
+  `function getMonoid<A>(): Monoid<A>`）も、型/戻り型注釈が Semigroup/Monoid/Group を名指せば
+  拾う。宣言名を carrier とみなし、object body は shape から実 op 名、opaque factory は注釈から
+  構造を合成。既存 infer 経路で Semigroup/Monoid/Group を導く。実 fp-ts 49・Effect 40 インスタンス検出）、
   `// konpu:` コメント注釈（共有 `directive`、`export class` は `export_statement` を剥がして到達）、
   law + `test("name")`/`it(...)` テスト名抽出、compliance、propagation（`T[]`/`Array`/`Set`/`Map` 正規化）、
   scaffold（`.laws.test.ts`、jest/vitest 形式 + `// konpu: law`）、
