@@ -354,9 +354,17 @@ konpu check: 法則テストの通過を確認
 - [ ] 「ドメイン層のモノイド則がインフラ層通過後も保存されること」の検査
 - [ ] 層間テストの存在・通過検査
 
-#### 2-B：Kotlin / TypeScript対応
-- [ ] tree-sitter-kotlin / tree-sitter-typescript アダプタ
-- [ ] 各言語のアノテーション規約策定（Kotlinのannotation class、TypeScriptのdecorator等）
+#### 2-B：多言語対応（2言語目 = Swift）
+言語シームを導入（`parser::Language` + `FileExtract`）。解析エンジン（check/infer/
+template/compliance）は言語非依存で、言語別は抽出層（`extract` / `extract_swift`）のみ。
+- [x] Swift アダプタ（tree-sitter-swift）: struct/class/enum/extension→ImplInfo、
+  function_declaration→MethodInfo（static=関連関数, mutating=&mut self）、
+  `static let zero`→単位元正規化、伝播度（struct field/enum variant）
+- [x] Swift アノテーション規約 = 推論優先 + `// konpu:` コメント
+  （monoid/semigroup/group/magma 宣言・law(<laws>)・ignore）
+- [x] `--test-results` が `swift test`(XCTest) 出力も解釈（FailingLawTest/compliance）
+- [ ] 残: 演算子メソッド（`+`/`*`）・`AdditiveArithmetic` 準拠検出・Swift 版 scaffold
+- [ ] Kotlin / TypeScript（3言語目以降。シームは整備済み）
 
 #### 2-C：oxidtr正式連携
 - [ ] oxidtrが生成するコードへのKonpuアノテーション自動付与
