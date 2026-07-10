@@ -18,13 +18,225 @@ use tree_sitter::Node;
 
 use super::extract::{ImplInfo, MethodInfo, SelfKind};
 
+use super::propagation::{TypeInfo, TypeKind};
+
+use std::collections::HashMap;
+
+use super::extract::{
+    ignore_reason_from_str, law_from_name, AnalyzedDeclaration, IgnoreInfo, LawTestInfo,
+};
+use crate::domain::konpu::AlgebraicStructure;
+
 /// Swift ファイル 1 つからバンドルを返す（言語ディスパッチ用）。
 pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
-    let mut fx = super::FileExtract::empty();
-    fx.impls = extract_impls(root, source);
-    fx.free_fns = extract_free_fns(root, source);
-    fx.type_sites = extract_type_sites(root, source, path);
-    fx
+    super::FileExtract {
+        decls: extract_declarations(root, source, path),
+        impls: extract_impls(root, source),
+        free_fns: extract_free_fns(root, source),
+        law_tests: extract_law_tests(root, source, path),
+        ignores: extract_ignores(root, source, path),
+        uses: Vec::new(), // Swift の import は層別制約に未使用（MVP）
+        type_sites: extract_type_sites(root, source, path),
+        type_infos: extract_type_infos(root, source),
+    }
+}
+
+/// `// konpu: head(args)` ディレクティブ。
+struct Directive {
+    head: String,
+    positional: Vec<String>,
+    kwargs: HashMap<String, String>,
+}
+
+/// コメントテキストから konpu ディレクティブを解析。`// konpu:` 以外は None。
+fn parse_directive(comment_text: &str) -> Option<Directive> {
+    let t = comment_text.trim_start_matches('/').trim();
+    let rest = t.strip_prefix("konpu:")?.trim();
+    let (head, argstr) = match rest.find('(') {
+        Some(i) => {
+            let end = rest.rfind(')').unwrap_or(rest.len());
+            (rest[..i].trim(), &rest[i + 1..end])
+        }
+        None => (rest, ""),
+    };
+    let mut positional = Vec::new();
+    let mut kwargs = HashMap::new();
+    for part in argstr.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = part.split_once(':') {
+            kwargs.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+        } else {
+            positional.push(part.to_string());
+        }
+    }
+    Some(Directive { head: head.to_string(), positional, kwargs })
+}
+
+/// コメント直後の named 宣言（他のコメントは飛ばす）。
+fn following_decl(comment: Node) -> Option<Node> {
+    let mut sib = comment.next_named_sibling();
+    while let Some(n) = sib {
+        if n.kind() == "comment" {
+            sib = n.next_named_sibling();
+        } else {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// 全 konpu ディレクティブコメントを (Directive, 直後宣言, 行) で列挙。
+fn directives<'a>(root: Node<'a>, source: &'a str) -> Vec<(Directive, Option<Node<'a>>, usize)> {
+    let mut comments = Vec::new();
+    collect_comments(root, &mut comments);
+    comments
+        .into_iter()
+        .filter_map(|n| {
+            parse_directive(text_of(n, source))
+                .map(|d| (d, following_decl(n), n.start_position().row + 1))
+        })
+        .collect()
+}
+
+fn collect_comments<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
+    if n.kind() == "comment" {
+        out.push(n);
+    }
+    let mut cur = n.walk();
+    for c in n.children(&mut cur) {
+        collect_comments(c, out);
+    }
+}
+
+fn structure_from(head: &str) -> Option<AlgebraicStructure> {
+    match head {
+        "monoid" => Some(AlgebraicStructure::Monoid),
+        "group" => Some(AlgebraicStructure::Group),
+        "semigroup" => Some(AlgebraicStructure::Semigroup),
+        "magma" => Some(AlgebraicStructure::Magma),
+        _ => None,
+    }
+}
+
+/// `// konpu: monoid(op: ..., identity: ...)` 等 → 直後の型への宣言。
+pub fn extract_declarations(root: Node, source: &str, path: &Path) -> Vec<AnalyzedDeclaration> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        let Some(structure) = structure_from(&d.head) else { continue };
+        let Some(decl) = decl else { continue };
+        if decl.kind() != "class_declaration" {
+            continue;
+        }
+        let Some(kw) = decl_keyword(decl, source) else { continue };
+        let Some(type_name) = decl_type_name(decl, source, &kw) else { continue };
+        out.push(AnalyzedDeclaration {
+            target_structure: structure,
+            higher_kinded: None,
+            type_name,
+            operation_name: d.kwargs.get("op").cloned().unwrap_or_default(),
+            identity_name: d.kwargs.get("identity").cloned(),
+            inverse_name: d.kwargs.get("inverse").cloned(),
+            path: path.to_path_buf(),
+            line,
+            propagation: None,
+        });
+    }
+    out
+}
+
+/// `// konpu: law(associativity, ...)` → 直後のテスト関数の LawTestInfo。
+/// Swift のテストは XCTest クラス内で対象型と別なので enclosing_type=None（全型に一致）。
+pub fn extract_law_tests(root: Node, source: &str, path: &Path) -> Vec<LawTestInfo> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        if d.head != "law" {
+            continue;
+        }
+        let laws: Vec<_> = d.positional.iter().filter_map(|s| law_from_name(s)).collect();
+        if laws.is_empty() {
+            continue;
+        }
+        let test_fn = decl.and_then(|n| {
+            (n.kind() == "function_declaration")
+                .then(|| first_child_of_kind(n, "simple_identifier").map(|c| text_of(c, source).to_string()))
+                .flatten()
+        });
+        out.push(LawTestInfo { laws, enclosing_type: None, test_fn, path: path.to_path_buf(), line });
+    }
+    out
+}
+
+/// `// konpu: ignore(reason: ..., note: "...")` → IgnoreInfo。
+pub fn extract_ignores(root: Node, source: &str, path: &Path) -> Vec<IgnoreInfo> {
+    let mut out = Vec::new();
+    for (d, decl, line) in directives(root, source) {
+        if d.head != "ignore" {
+            continue;
+        }
+        let Some(reason) = d.kwargs.get("reason").and_then(|r| ignore_reason_from_str(r)) else {
+            continue;
+        };
+        let type_name = decl.and_then(|n| {
+            (n.kind() == "class_declaration")
+                .then(|| decl_keyword(n, source).and_then(|kw| decl_type_name(n, source, &kw)))
+                .flatten()
+        });
+        out.push(IgnoreInfo { reason, note: d.kwargs.get("note").cloned(), type_name, path: path.to_path_buf(), line });
+    }
+    out
+}
+
+/// 文脈伝播度（Axis 4）用の型情報。struct のフィールド型と enum のバリアント数。
+/// ponytail: Swift の `[T]`/`T?` はコレクション/optional だが propagation の
+/// Unbounded 判定は Rust の `Vec`/`Option` 前提。Swift 構文の非有界判定は未対応
+/// （過小評価）。実需が出たら propagation 側に Swift 構文を足す。
+pub fn extract_type_infos(root: Node, source: &str) -> Vec<TypeInfo> {
+    let mut out = Vec::new();
+    recurse(root, &mut |n| {
+        if n.kind() != "class_declaration" {
+            return;
+        }
+        let Some(kw) = decl_keyword(n, source) else { return };
+        let Some(name) = decl_type_name(n, source, &kw) else { return };
+        match kw.as_str() {
+            "enum" => {
+                let Some(body) = first_child_of_kind(n, "enum_class_body") else { return };
+                let mut variant_count = 0;
+                let mut bcur = body.walk();
+                for entry in body.children(&mut bcur) {
+                    if entry.kind() == "enum_entry" {
+                        let mut ecur = entry.walk();
+                        variant_count += entry
+                            .children(&mut ecur)
+                            .filter(|c| c.kind() == "simple_identifier")
+                            .count();
+                    }
+                }
+                out.push(TypeInfo { name, kind: TypeKind::Enum, variant_count, field_types: Vec::new() });
+            }
+            "struct" | "class" => {
+                let Some(body) = first_child_of_kind(n, "class_body") else { return };
+                let mut field_types = Vec::new();
+                let mut bcur = body.walk();
+                for member in body.children(&mut bcur) {
+                    if member.kind() == "property_declaration"
+                        && !has_modifier(member, source, "static")
+                        && !has_modifier(member, source, "class")
+                    {
+                        if let Some(t) = property_type(member, source) {
+                            field_types.push(t);
+                        }
+                    }
+                }
+                out.push(TypeInfo { name, kind: TypeKind::Struct, variant_count: 0, field_types });
+            }
+            _ => {}
+        }
+    });
+    out
 }
 
 fn text_of<'a>(n: Node, source: &'a str) -> &'a str {
@@ -225,11 +437,13 @@ fn parse_static_property(n: Node, source: &str) -> Option<MethodInfo> {
     })
 }
 
-/// プロパティの型: `type_annotation` の型、無ければ初期化子の構築型（`T(...)`）。
+/// プロパティの型: `type_annotation` 直下の型ノード（user_type/array_type/…）、
+/// 無ければ初期化子の構築型（`= T(...)`）。
 fn property_type(n: Node, source: &str) -> Option<String> {
     if let Some(ta) = first_child_of_kind(n, "type_annotation") {
-        if let Some(ut) = first_child_of_kind(ta, "user_type") {
-            return Some(text_of(ut, source).trim().to_string());
+        let mut cur = ta.walk();
+        if let Some(t) = ta.children(&mut cur).find(|c| c.is_named()) {
+            return Some(text_of(t, source).trim().to_string());
         }
     }
     // `static let unit = Money(...)` → call_expression の被呼び出し名。
@@ -326,6 +540,62 @@ mod tests {
         assert_eq!(fns[0].name, "zero");
         assert_eq!(fns[0].return_type.as_deref(), Some("Money"));
         assert!(fns[0].self_param.is_none());
+    }
+
+    fn type_infos_of(src: &str) -> Vec<TypeInfo> {
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        extract_type_infos(tree.root_node(), src)
+    }
+
+    #[test]
+    fn enum_variant_count() {
+        let t = type_infos_of("enum E { case a, b\n case c(Int)\n case d }");
+        let e = t.iter().find(|i| i.name == "E").unwrap();
+        assert_eq!(e.kind, TypeKind::Enum);
+        assert_eq!(e.variant_count, 4); // a, b, c, d
+    }
+
+    #[test]
+    fn struct_field_types_exclude_static() {
+        let t = type_infos_of(
+            "struct S {\n  let x: Int\n  var y: Money\n  let z: [Money]\n  static let zero = S()\n}",
+        );
+        let s = t.iter().find(|i| i.name == "S").unwrap();
+        assert_eq!(s.kind, TypeKind::Struct);
+        // static `zero` excluded; z keeps its array type text.
+        assert_eq!(s.field_types, vec!["Int".to_string(), "Money".to_string(), "[Money]".to_string()]);
+    }
+
+    #[test]
+    fn comment_annotation_declares_monoid() {
+        let src = "// konpu: monoid(op: combine, identity: zero)\nstruct Money { let amount: Int }";
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        let decls = extract_declarations(tree.root_node(), src, Path::new("M.swift"));
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].type_name, "Money");
+        assert_eq!(decls[0].target_structure, AlgebraicStructure::Monoid);
+        assert_eq!(decls[0].operation_name, "combine");
+        assert_eq!(decls[0].identity_name.as_deref(), Some("zero"));
+    }
+
+    #[test]
+    fn comment_law_annotation_on_test_func() {
+        let src = "class T {\n  // konpu: law(associativity)\n  func testAssoc() {}\n}";
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        let laws = extract_law_tests(tree.root_node(), src, Path::new("T.swift"));
+        assert_eq!(laws.len(), 1);
+        assert_eq!(laws[0].test_fn.as_deref(), Some("testAssoc"));
+        assert!(laws[0].enclosing_type.is_none());
+    }
+
+    #[test]
+    fn comment_ignore_annotation() {
+        let src = "// konpu: ignore(reason: intentional, note: \"order matters\")\nstruct Discounts {}";
+        let tree = parser::parse_with(src, parser::Language::Swift).unwrap();
+        let ig = extract_ignores(tree.root_node(), src, Path::new("D.swift"));
+        assert_eq!(ig.len(), 1);
+        assert_eq!(ig[0].note.as_deref(), Some("order matters"));
+        assert_eq!(ig[0].type_name.as_deref(), Some("Discounts"));
     }
 
     #[test]

@@ -206,19 +206,26 @@ fn law_index(l: &Law) -> usize {
     }
 }
 
-/// `cargo test` の出力（キャプチャ済み）から不通過テストの名前集合を返す。
-/// konpu はテストを走らせず結果を参照するだけ（リンター原則）。libtest は
-/// 失敗時に末尾へ `failures:` ブロックを出し、失敗テストの完全修飾名を
-/// インデント付きで列挙する。その clean list（`    module::name` 形式）だけを
-/// 拾い、末尾セグメント（`name`）に正規化する。パニック詳細ブロックは直後に
-/// 空行が来て state がリセットされるため混入しない。
+/// テスト出力（キャプチャ済み）から不通過テストの名前集合を返す。
+/// konpu はテストを走らせず結果を参照するだけ（リンター原則）。2 形式を扱う:
+/// - Rust libtest: 末尾の `failures:` ブロックが失敗テストの完全修飾名を
+///   インデント付きで列挙。その clean list だけを拾う（パニック詳細ブロックは
+///   直後の空行で state がリセットされ混入しない）。
+/// - Swift XCTest: `Test Case '-[Module.Class method]' failed ...` 行。
+///   末尾セグメント（`method`）を拾う。
 ///
-/// ponytail: 末尾セグメント照合なので、別モジュールに同名テストがあると
-/// 取り違えうる。実害が出たら module パス込みで照合する。
-pub fn parse_failed_tests(cargo_test_output: &str) -> HashSet<String> {
+/// どちらも末尾セグメント照合なので、別モジュール/クラスに同名テストがあると
+/// 取り違えうる（ponytail: 実需が出たら完全修飾で照合）。
+pub fn parse_failed_tests(test_output: &str) -> HashSet<String> {
     let mut failed = HashSet::new();
     let mut in_block = false;
-    for line in cargo_test_output.lines() {
+    for line in test_output.lines() {
+        // Swift XCTest の失敗行（行単位・state 非依存）。
+        if let Some(name) = swift_failed_test(line) {
+            failed.insert(name);
+            continue;
+        }
+        // Rust libtest の failures: ブロック。
         if line.trim_end() == "failures:" {
             in_block = true;
             continue;
@@ -227,16 +234,26 @@ pub fn parse_failed_tests(cargo_test_output: &str) -> HashSet<String> {
             continue;
         }
         match line.strip_prefix("    ") {
-            // 単一トークン（空白なし）＝失敗テストの完全修飾名。
             Some(name) if !name.trim().is_empty() && !name.trim().contains(' ') => {
                 let name = name.trim();
                 failed.insert(name.rsplit("::").next().unwrap_or(name).to_string());
             }
-            // 空行や非インデント行（`test result:` 等）でブロック終了。
             _ => in_block = false,
         }
     }
     failed
+}
+
+/// Swift XCTest の失敗行から末尾のメソッド名を取る。
+/// 例: `Test Case '-[MyTests.MoneyTests testAssoc]' failed (0.1 seconds).` → `testAssoc`。
+fn swift_failed_test(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !line.starts_with("Test Case") || !line.contains("failed") {
+        return None;
+    }
+    let inner = line.split('[').nth(1)?.split(']').next()?; // `Module.Class method`
+    let method = inner.split_whitespace().last()?;
+    (!method.is_empty()).then(|| method.to_string())
 }
 
 /// 1 つの (宣言, 法則) のテスト状態。
@@ -443,6 +460,18 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored";
         let failed = parse_failed_tests(out);
         assert_eq!(failed.len(), 1);
         assert!(failed.contains("money_assoc"));
+    }
+
+    #[test]
+    fn parse_failed_tests_swift_xctest_format() {
+        let out = "\
+Test Suite 'MoneyTests' started
+Test Case '-[WalletTests.MoneyTests testAssoc]' passed (0.001 seconds).
+Test Case '-[WalletTests.MoneyTests testLeftId]' failed (0.002 seconds).
+Test Suite 'MoneyTests' failed";
+        let failed = parse_failed_tests(out);
+        assert_eq!(failed.len(), 1);
+        assert!(failed.contains("testLeftId"));
     }
 
     #[test]
