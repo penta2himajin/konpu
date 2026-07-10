@@ -54,13 +54,20 @@ enum Commands {
         #[arg(long)]
         out: Option<String>,
     },
-    /// Print a summary: diagnostics, ignores, declarations
+    /// Print a summary: diagnostics, ignores, declarations, compliance gap
     Report {
         /// Path to analyze
         path: String,
         /// Path to konpu.toml (default: ./konpu.toml if present)
         #[arg(long)]
         config: Option<String>,
+        /// Path to captured `cargo test` output. Refines the compliance gap by
+        /// splitting covered laws into passing vs failing (else all covered = passing).
+        #[arg(long)]
+        test_results: Option<String>,
+        /// Infer algebraic structures from impls even without annotations.
+        #[arg(long)]
+        infer: bool,
     },
     /// Build the call graph (via rust-analyzer/SCIP) and report cycles + hubs
     #[cfg(feature = "call-graph")]
@@ -261,14 +268,26 @@ fn main() {
                 }
             }
         }
-        Commands::Report { path, config } => {
-            use konpu::analyze::template;
+        Commands::Report { path, config, test_results, infer } => {
+            use konpu::analyze::{check, template};
             use konpu::domain::konpu::Severity;
             use std::collections::BTreeMap;
             let p = std::path::PathBuf::from(path);
             let config_path = resolve_config_path(config.as_deref(), &p);
-            let resolved = template::load(&config_path);
-            let result = konpu::analyze::analyze_full(&p, &resolved);
+            let mut resolved = template::load(&config_path);
+            resolved.infer = resolved.infer || infer;
+            let has_results = test_results.is_some();
+            let failed_tests = match test_results {
+                Some(rp) => match std::fs::read_to_string(&rp) {
+                    Ok(out) => check::parse_failed_tests(&out),
+                    Err(e) => {
+                        eprintln!("konpu report: failed to read --test-results {rp}: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                None => std::collections::HashSet::new(),
+            };
+            let result = konpu::analyze::analyze_with_results(&p, &resolved, &failed_tests);
             let mut by_sev: BTreeMap<Severity, usize> = BTreeMap::new();
             let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
             for d in &result.diagnostics {
@@ -321,6 +340,32 @@ fn main() {
                     v.line,
                     v.imported_path,
                     v.reason
+                );
+            }
+            // 充足ギャップ（軸2）: 各宣言の required 法則のうち passing の割合。
+            let compliance = check::law_compliance(&result.declarations, &result.law_tests, &failed_tests);
+            let (req_total, pass_total): (usize, usize) =
+                compliance.iter().fold((0, 0), |(r, p), c| (r + c.required, p + c.passing));
+            let overall_gap = if req_total == 0 { 0.0 } else { 1.0 - pass_total as f64 / req_total as f64 };
+            println!(
+                "compliance gap: {:.2} ({}/{} laws verified across {} structure(s)){}",
+                overall_gap,
+                pass_total,
+                req_total,
+                compliance.len(),
+                if has_results { "" } else { " [presence only; pass --test-results to detect failing]" }
+            );
+            for c in &compliance {
+                println!(
+                    "  {} ({:?}): gap {:.2} — {}/{} verified [pass {}, fail {}, missing {}]",
+                    c.type_name,
+                    c.structure,
+                    c.gap(),
+                    c.passing,
+                    c.required,
+                    c.passing,
+                    c.failing,
+                    c.missing
                 );
             }
         }

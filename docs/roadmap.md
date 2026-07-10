@@ -323,7 +323,7 @@ konpu check: 法則テストの通過を確認
 - [x] `#[konpu::law(...)]`アノテーションによるテスト発見メカニズム
 - [x] CI実行結果の参照方式設計（`konpu check --test-results <captured cargo test output>` で `failures:` を読む。konpu はテストを走らせず結果を参照するだけ）
 - [x] テスト未存在時のワーニング出力（`MissingLawTest`）
-- [x] テスト不通過時のエラー出力（`FailingLawTest`）。※ 充足ギャップ G の数値レポート化（`report` への集計）は未対応（BACKLOG）
+- [x] テスト不通過時のエラー出力（`FailingLawTest`）＋ 充足ギャップ G の数値レポート化（`konpu report [--test-results] [--infer]` が per-structure / overall の gap = 1 - passing/required を表示）
 
 #### 1-B：文脈伝播度の計測
 - [ ] 型定義からの構造的サイズ算出（enum → バリアント数、struct → フィールド直積）

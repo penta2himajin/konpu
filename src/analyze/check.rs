@@ -239,6 +239,43 @@ pub fn parse_failed_tests(cargo_test_output: &str) -> HashSet<String> {
     failed
 }
 
+/// 1 つの (宣言, 法則) のテスト状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LawStatus {
+    /// テストが存在し通過（または `--test-results` 無しで存在のみ確認）。
+    Passing,
+    /// テストは存在するが `--test-results` で不通過が確認された。
+    Failing,
+    /// この法則を検証するテストが無い。
+    Missing,
+}
+
+/// `decl` の `law` を検証するテストの状態を返す。診断とレポート集計で共有。
+fn classify_law(
+    decl: &AnalyzedDeclaration,
+    law: &Law,
+    law_tests: &[LawTestInfo],
+    failed_tests: &HashSet<String>,
+) -> LawStatus {
+    let covering: Vec<&LawTestInfo> = law_tests
+        .iter()
+        .filter(|t| {
+            t.laws.iter().any(|l| l == law)
+                && (t.enclosing_type.is_none() || t.enclosing_type.as_deref() == Some(&decl.type_name))
+        })
+        .collect();
+    if covering.is_empty() {
+        LawStatus::Missing
+    } else if covering
+        .iter()
+        .any(|t| t.test_fn.as_deref().is_some_and(|f| failed_tests.contains(f)))
+    {
+        LawStatus::Failing
+    } else {
+        LawStatus::Passing
+    }
+}
+
 pub fn check_law_tests(
     decls: &[AnalyzedDeclaration],
     law_tests: &[LawTestInfo],
@@ -256,42 +293,68 @@ pub fn check_law_tests(
             identityName: None,
             inverseName: None,
         };
+        for law in &required_laws_for(&decl.target_structure) {
+            let (severity, rule) = match classify_law(decl, law, law_tests, failed_tests) {
+                LawStatus::Missing => (Severity::Warning, DiagnosticRule::MissingLawTest),
+                LawStatus::Failing => (Severity::Error, DiagnosticRule::FailingLawTest),
+                LawStatus::Passing => continue,
+            };
+            out.push((decl.path.clone(), decl.line, Diagnostic { severity, declaration: declaration(), rule }));
+        }
+    }
+    out
+}
+
+/// 1 宣言分の充足ギャップ集計。`gap` = 1 - passing/required（roadmap 軸2）。
+/// missing も failing も「未充足」に数える（テスト充足率であって真の充足度ではない）。
+#[derive(Debug, Clone)]
+pub struct LawCompliance {
+    pub type_name: String,
+    pub structure: AlgebraicStructure,
+    pub required: usize,
+    pub passing: usize,
+    pub failing: usize,
+    pub missing: usize,
+}
+
+impl LawCompliance {
+    pub fn gap(&self) -> f64 {
+        if self.required == 0 {
+            0.0
+        } else {
+            1.0 - (self.passing as f64) / (self.required as f64)
+        }
+    }
+}
+
+/// 各宣言（rank>=1）の法則充足を集計する。`report` の充足ギャップ表示用。
+pub fn law_compliance(
+    decls: &[AnalyzedDeclaration],
+    law_tests: &[LawTestInfo],
+    failed_tests: &HashSet<String>,
+) -> Vec<LawCompliance> {
+    let mut out = Vec::new();
+    for decl in decls {
+        if decl.target_structure.rank() < 1 {
+            continue;
+        }
+        let (mut passing, mut failing, mut missing) = (0, 0, 0);
         let required = required_laws_for(&decl.target_structure);
         for law in &required {
-            let covering: Vec<&LawTestInfo> = law_tests
-                .iter()
-                .filter(|t| {
-                    t.laws.iter().any(|l| l == law)
-                        && (t.enclosing_type.is_none() || t.enclosing_type.as_deref() == Some(&decl.type_name))
-                })
-                .collect();
-            if covering.is_empty() {
-                out.push((
-                    decl.path.clone(),
-                    decl.line,
-                    Diagnostic {
-                        severity: Severity::Warning,
-                        declaration: declaration(),
-                        rule: DiagnosticRule::MissingLawTest,
-                    },
-                ));
-            } else if covering
-                .iter()
-                .any(|t| t.test_fn.as_deref().is_some_and(|f| failed_tests.contains(f)))
-            {
-                // 法則を検証するテストが存在するが不通過＝法則が破れている。
-                out.push((
-                    decl.path.clone(),
-                    decl.line,
-                    Diagnostic {
-                        severity: Severity::Error,
-                        declaration: declaration(),
-                        rule: DiagnosticRule::FailingLawTest,
-                    },
-                ));
+            match classify_law(decl, law, law_tests, failed_tests) {
+                LawStatus::Passing => passing += 1,
+                LawStatus::Failing => failing += 1,
+                LawStatus::Missing => missing += 1,
             }
-            // covered かつ全て通過なら診断なし。
         }
+        out.push(LawCompliance {
+            type_name: decl.type_name.clone(),
+            structure: decl.target_structure.clone(),
+            required: required.len(),
+            passing,
+            failing,
+            missing,
+        });
     }
     out
 }
@@ -406,6 +469,40 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored";
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].2.rule, DiagnosticRule::FailingLawTest);
         assert_eq!(out[0].2.severity, Severity::Error);
+    }
+
+    #[test]
+    fn compliance_gap_counts_pass_fail_missing() {
+        // Monoid requires 3 laws (assoc, left_id, right_id). Provide an assoc
+        // test that fails and a left_identity test that passes; right_id missing.
+        let decls = vec![decl("Money", AlgebraicStructure::Monoid)];
+        let tests = vec![
+            law_test("Money", "assoc_fn"), // laws: [Associativity]
+            LawTestInfo {
+                laws: vec![Law::LeftIdentity],
+                enclosing_type: Some("Money".to_string()),
+                test_fn: Some("left_id_fn".to_string()),
+                path: PathBuf::from("src/x.rs"),
+                line: 1,
+            },
+        ];
+        let failed = HashSet::from(["assoc_fn".to_string()]);
+        let c = &law_compliance(&decls, &tests, &failed)[0];
+        assert_eq!(c.required, 3);
+        assert_eq!(c.passing, 1); // left_identity
+        assert_eq!(c.failing, 1); // associativity
+        assert_eq!(c.missing, 1); // right_identity
+        assert!((c.gap() - (1.0 - 1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compliance_gap_zero_when_all_pass() {
+        let decls = vec![decl("S", AlgebraicStructure::Semigroup)]; // needs assoc only
+        let tests = vec![law_test("S", "s_assoc")];
+        let c = &law_compliance(&decls, &tests, &HashSet::new())[0];
+        assert_eq!(c.required, 1);
+        assert_eq!(c.passing, 1);
+        assert_eq!(c.gap(), 0.0);
     }
 
     #[test]
