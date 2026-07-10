@@ -103,6 +103,7 @@ fn run_call_graph_preserve(
     let facts = match ts_lang {
         Some(Language::Swift) => call_graph::swift::facts_from_swift_project(path),
         Some(Language::Kotlin) => call_graph::kotlin::facts_from_kotlin_project(path),
+        Some(Language::Ts) => call_graph::ts::facts_from_ts_project(path),
         _ => match call_graph::facts_from_project(path) {
             Ok(f) => f,
             Err(e) => {
@@ -115,6 +116,7 @@ fn run_call_graph_preserve(
     let sigs = match ts_lang {
         Some(Language::Swift) => call_graph::swift::fn_signatures_swift(path),
         Some(Language::Kotlin) => call_graph::kotlin::fn_signatures_kotlin(path),
+        Some(Language::Ts) => call_graph::ts::fn_signatures_ts(path),
         _ => call_graph::fn_signatures(path),
     };
     let findings =
@@ -164,7 +166,7 @@ fn resolve_config_path(explicit: Option<&str>, analyze_path: &std::path::Path) -
     std::path::PathBuf::from("konpu.toml")
 }
 
-/// call graph を tree-sitter で構築すべき単一言語（Swift / Kotlin）を判定。
+/// call graph を tree-sitter で構築すべき単一言語（Swift / Kotlin / TS）を判定。
 /// Rust を含む、または複数の非Rust言語が混在する場合は `None`（Rust/SCIP 経路）。
 #[cfg(feature = "call-graph")]
 fn cg_ts_language(path: &std::path::Path) -> Option<konpu::analyze::parser::Language> {
@@ -173,11 +175,14 @@ fn cg_ts_language(path: &std::path::Path) -> Option<konpu::analyze::parser::Lang
     if files.iter().any(|(_, l)| *l == Language::Rust) {
         return None;
     }
-    let swift = files.iter().filter(|(_, l)| *l == Language::Swift).count();
-    let kotlin = files.iter().filter(|(_, l)| *l == Language::Kotlin).count();
-    match (swift, kotlin) {
-        (s, 0) if s > 0 => Some(Language::Swift),
-        (0, k) if k > 0 => Some(Language::Kotlin),
+    let swift = files.iter().any(|(_, l)| *l == Language::Swift);
+    let kotlin = files.iter().any(|(_, l)| *l == Language::Kotlin);
+    let ts = files.iter().any(|(_, l)| *l == Language::Ts);
+    // 非Rustが 1 言語だけならその tree-sitter 経路。混在（or 皆無）は SCIP 経路。
+    match (swift, kotlin, ts) {
+        (true, false, false) => Some(Language::Swift),
+        (false, true, false) => Some(Language::Kotlin),
+        (false, false, true) => Some(Language::Ts),
         _ => None,
     }
 }
@@ -428,6 +433,9 @@ fn main() {
                     }
                     Some(konpu::analyze::parser::Language::Kotlin) => {
                         Ok(konpu::analyze::call_graph::kotlin::facts_from_kotlin_project(std::path::Path::new(&path)))
+                    }
+                    Some(konpu::analyze::parser::Language::Ts) => {
+                        Ok(konpu::analyze::call_graph::ts::facts_from_ts_project(std::path::Path::new(&path)))
                     }
                     _ => facts_from_project(std::path::Path::new(&path)),
                 },

@@ -24,6 +24,8 @@ use super::parser;
 pub mod kotlin;
 #[cfg(feature = "call-graph")]
 pub mod swift;
+#[cfg(feature = "call-graph")]
+pub mod ts;
 
 /// ソース中で「値位置で構築される型名」の集合を tree-sitter で抽出する。
 ///

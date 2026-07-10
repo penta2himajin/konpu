@@ -384,8 +384,13 @@ template/compliance）は言語非依存で、言語別は抽出層（`extract` 
   `// konpu:` コメント注釈（共有 `directive`、`export class` は `export_statement` を剥がして到達）、
   law + `test("name")`/`it(...)` テスト名抽出、compliance、propagation（`T[]`/`Array`/`Set`/`Map` 正規化）、
   scaffold（`.laws.test.ts`、jest/vitest 形式 + `// konpu: law`）、
-  逆import境界（import 指定子を `from_modules` 接頭辞照合）。`src/analyze/extract_ts.rs` のみ新規、
-  解析エンジンは無改変。**call graph（layer 2b）は未対応**（共有 CG エンジン抽出後の後続）。
+  逆import境界（import 指定子を `from_modules` 接頭辞照合）、
+  call graph（layer 2b: `src/analyze/call_graph/ts.rs`。`new T(...)`=構築、`a.foo()`/`this.a.foo()`
+  =member_expression。TS はインスタンスメンバを常に `this.` 修飾するので、`resolve_receiver` が
+  `this`/ローカル/`this.<field>`/`Type.` を再帰的に型解決。callable-value 規約は無いので bare 呼びは
+  self→自由関数→Dynamic。preserve B/C も動作）。**Swift/Kotlin と完全同等**（layer-3 + layer-2b）。
+  言語別実装は `extract/ts.rs` + `call_graph/ts.rs` のみ、解析エンジンは無改変。
+  CLI は `cg_ts_language` で Rust/SCIP・Swift・Kotlin・TS を 4-way 判定。
 
 #### 2-C：oxidtr正式連携
 - [ ] oxidtrが生成するコードへのKonpuアノテーション自動付与
