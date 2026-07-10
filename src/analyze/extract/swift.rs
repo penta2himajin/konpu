@@ -407,6 +407,9 @@ fn fn_name(n: Node, source: &str) -> Option<String> {
             return Some(match raw {
                 "+" => "add".to_string(),
                 "*" => "mul".to_string(),
+                // `<>` は Haskell/Swift FP（pointfree, Bow …）の semigroup 演算子。
+                // 標準演算子ではないが慣習は普遍なので combine 族にマップする。
+                "<>" => "combine".to_string(),
                 other => other.to_string(),
             });
         }
@@ -649,6 +652,16 @@ mod tests {
     fn star_operator_maps_to_mul() {
         let impls = impls_of("struct M {\n  static func * (a: M, b: M) -> M { a }\n}");
         assert!(impls[0].methods.iter().any(|m| m.name == "mul"));
+    }
+
+    #[test]
+    fn diamond_operator_maps_to_combine() {
+        // `<>` = Haskell/Swift FP の semigroup 演算子（pointfree/Bow）。combine 族へ。
+        let impls = impls_of("struct S {\n  static func <> (lhs: S, rhs: S) -> S { lhs }\n}");
+        let combine = method(&impls[0], "combine"); // `<>` normalized to `combine`
+        assert!(combine.is_assoc_fn);
+        assert_eq!(combine.params, vec!["S".to_string(), "S".to_string()]);
+        assert_eq!(combine.return_type.as_deref(), Some("S"));
     }
 
     #[test]
