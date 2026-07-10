@@ -54,6 +54,19 @@ pub fn analyze_full(path: &Path, config: &template::ResolvedConfig) -> AnalysisR
     analyze_full_with_cg(path, config, None)
 }
 
+/// `cargo test` 出力から得た不通過テスト集合を渡して解析する。
+/// 不通過が法則テストに紐づく型には `FailingLawTest` (Error) を出す。
+/// `failed_tests` が空なら従来どおり `MissingLawTest` のみ（通過/不通過は未評価）。
+pub fn analyze_with_results(
+    path: &Path,
+    config: &template::ResolvedConfig,
+    failed_tests: &std::collections::HashSet<String>,
+) -> AnalysisResult {
+    let mut r = analyze_full_body(path, config, failed_tests);
+    r.call_graph_resolutions = 0;
+    r
+}
+
 /// コールグラフ provider を渡せる統合 API。
 ///
 /// `provider` が `Some` の場合、preserve 検査で実際のコールエッジも参照する
@@ -66,7 +79,7 @@ pub fn analyze_full_with_cg(
 ) -> AnalysisResult {
     // Phase 0: provider 未使用。Phase 1 以降でここを resolve_outgoing_calls
     // 呼び出しに置き換える。
-    let mut r = analyze_full_body(path, config);
+    let mut r = analyze_full_body(path, config, &std::collections::HashSet::new());
     r.call_graph_resolutions = 0;
     r
 }
@@ -81,7 +94,11 @@ struct Extracted {
 }
 
 /// 実際の解析本体。provider 非依存の従来ロジック。フェーズに分割して各段を委譲する。
-fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> AnalysisResult {
+fn analyze_full_body(
+    path: &Path,
+    config: &template::ResolvedConfig,
+    failed_tests: &std::collections::HashSet<String>,
+) -> AnalysisResult {
     let files: Vec<PathBuf> = parser::collect_rust_files(path)
         .into_iter()
         .filter(|f| !config.is_excluded(f, path))
@@ -94,7 +111,7 @@ fn analyze_full_body(path: &Path, config: &template::ResolvedConfig) -> Analysis
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
     let ex = extract_all(&files, config.infer);
-    let diagnostics = run_diagnostics(&ex, config, &root);
+    let diagnostics = run_diagnostics(&ex, config, &root, failed_tests);
     let expectation_mismatches = layer_mismatches(&ex.decls, config, &root);
     let boundary_violations = boundary_checks(&ex, config, &root);
     AnalysisResult {
@@ -156,7 +173,12 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
 }
 
 /// フェーズ2: 宣言・伝播・law test の診断を集めてパス/行でソートする。
-fn run_diagnostics(ex: &Extracted, config: &template::ResolvedConfig, root: &Path) -> Vec<AnalyzedDiagnostic> {
+fn run_diagnostics(
+    ex: &Extracted,
+    config: &template::ResolvedConfig,
+    root: &Path,
+    failed_tests: &std::collections::HashSet<String>,
+) -> Vec<AnalyzedDiagnostic> {
     let mut out: Vec<AnalyzedDiagnostic> = Vec::new();
     for decl in &ex.decls {
         for diag in check::check_declaration(decl, &ex.impls) {
@@ -166,7 +188,7 @@ fn run_diagnostics(ex: &Extracted, config: &template::ResolvedConfig, root: &Pat
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
     }
-    for (path, line, diag) in check::check_law_tests(&ex.decls, &ex.law_tests) {
+    for (path, line, diag) in check::check_law_tests(&ex.decls, &ex.law_tests, failed_tests) {
         out.push(AnalyzedDiagnostic { path, line, diag });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));

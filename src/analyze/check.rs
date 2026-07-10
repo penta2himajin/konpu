@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::konpu::{
@@ -185,39 +186,91 @@ fn law_index(l: &Law) -> usize {
     }
 }
 
+/// `cargo test` の出力（キャプチャ済み）から不通過テストの名前集合を返す。
+/// konpu はテストを走らせず結果を参照するだけ（リンター原則）。libtest は
+/// 失敗時に末尾へ `failures:` ブロックを出し、失敗テストの完全修飾名を
+/// インデント付きで列挙する。その clean list（`    module::name` 形式）だけを
+/// 拾い、末尾セグメント（`name`）に正規化する。パニック詳細ブロックは直後に
+/// 空行が来て state がリセットされるため混入しない。
+///
+/// ponytail: 末尾セグメント照合なので、別モジュールに同名テストがあると
+/// 取り違えうる。実害が出たら module パス込みで照合する。
+pub fn parse_failed_tests(cargo_test_output: &str) -> HashSet<String> {
+    let mut failed = HashSet::new();
+    let mut in_block = false;
+    for line in cargo_test_output.lines() {
+        if line.trim_end() == "failures:" {
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        match line.strip_prefix("    ") {
+            // 単一トークン（空白なし）＝失敗テストの完全修飾名。
+            Some(name) if !name.trim().is_empty() && !name.trim().contains(' ') => {
+                let name = name.trim();
+                failed.insert(name.rsplit("::").next().unwrap_or(name).to_string());
+            }
+            // 空行や非インデント行（`test result:` 等）でブロック終了。
+            _ => in_block = false,
+        }
+    }
+    failed
+}
+
 pub fn check_law_tests(
     decls: &[AnalyzedDeclaration],
     law_tests: &[LawTestInfo],
+    failed_tests: &HashSet<String>,
 ) -> Vec<(PathBuf, usize, Diagnostic)> {
     let mut out = Vec::new();
     for decl in decls {
         if decl.target_structure.rank() < 1 {
             continue;
         }
+        let declaration = || AlgebraicDeclaration {
+            targetStructure: decl.target_structure.clone(),
+            higherKinded: decl.higher_kinded.clone(),
+            operationName: OperationName,
+            identityName: None,
+            inverseName: None,
+        };
         let required = required_laws_for(&decl.target_structure);
         for law in &required {
-            let covered = law_tests.iter().any(|t| {
-                t.laws.iter().any(|l| l == law)
-                    && (t.enclosing_type.is_none() || t.enclosing_type.as_deref() == Some(&decl.type_name))
-            });
-            if !covered {
-                let declaration = AlgebraicDeclaration {
-                    targetStructure: decl.target_structure.clone(),
-                    higherKinded: decl.higher_kinded.clone(),
-                    operationName: OperationName,
-                    identityName: None,
-                    inverseName: None,
-                };
+            let covering: Vec<&LawTestInfo> = law_tests
+                .iter()
+                .filter(|t| {
+                    t.laws.iter().any(|l| l == law)
+                        && (t.enclosing_type.is_none() || t.enclosing_type.as_deref() == Some(&decl.type_name))
+                })
+                .collect();
+            if covering.is_empty() {
                 out.push((
                     decl.path.clone(),
                     decl.line,
                     Diagnostic {
                         severity: Severity::Warning,
-                        declaration,
+                        declaration: declaration(),
                         rule: DiagnosticRule::MissingLawTest,
                     },
                 ));
+            } else if covering
+                .iter()
+                .any(|t| t.test_fn.as_deref().is_some_and(|f| failed_tests.contains(f)))
+            {
+                // 法則を検証するテストが存在するが不通過＝法則が破れている。
+                out.push((
+                    decl.path.clone(),
+                    decl.line,
+                    Diagnostic {
+                        severity: Severity::Error,
+                        declaration: declaration(),
+                        rule: DiagnosticRule::FailingLawTest,
+                    },
+                ));
             }
+            // covered かつ全て通過なら診断なし。
         }
     }
     out
@@ -255,5 +308,93 @@ pub fn check_propagation(
         _ => {}
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decl(ty: &str, s: AlgebraicStructure) -> AnalyzedDeclaration {
+        AnalyzedDeclaration {
+            target_structure: s,
+            higher_kinded: None,
+            type_name: ty.to_string(),
+            operation_name: "combine".to_string(),
+            identity_name: None,
+            inverse_name: None,
+            path: PathBuf::from("src/x.rs"),
+            line: 1,
+            propagation: None,
+        }
+    }
+
+    fn law_test(ty: &str, fn_name: &str) -> LawTestInfo {
+        LawTestInfo {
+            laws: vec![Law::Associativity],
+            enclosing_type: Some(ty.to_string()),
+            test_fn: Some(fn_name.to_string()),
+            path: PathBuf::from("src/x.rs"),
+            line: 1,
+        }
+    }
+
+    #[test]
+    fn parse_failed_tests_picks_the_clean_failures_list() {
+        let out = "\
+running 3 tests
+test tests::passing ... ok
+test tests::money_assoc ... FAILED
+
+failures:
+
+---- tests::money_assoc stdout ----
+thread 'tests::money_assoc' panicked at src/lib.rs:42:9:
+assertion `left == right` failed
+  left: 5
+ right: 6
+
+failures:
+    tests::money_assoc
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored";
+        let failed = parse_failed_tests(out);
+        assert_eq!(failed.len(), 1);
+        assert!(failed.contains("money_assoc"));
+    }
+
+    #[test]
+    fn parse_failed_tests_empty_when_all_pass() {
+        let out = "test tests::a ... ok\n\ntest result: ok. 1 passed; 0 failed";
+        assert!(parse_failed_tests(out).is_empty());
+    }
+
+    #[test]
+    fn covered_and_passing_yields_no_diagnostic() {
+        let decls = vec![decl("Money", AlgebraicStructure::Semigroup)];
+        let tests = vec![law_test("Money", "money_assoc")];
+        let failed = HashSet::new(); // nothing failed
+        let out = check_law_tests(&decls, &tests, &failed);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn covered_but_failing_yields_failing_law_test_error() {
+        let decls = vec![decl("Money", AlgebraicStructure::Semigroup)];
+        let tests = vec![law_test("Money", "money_assoc")];
+        let failed = HashSet::from(["money_assoc".to_string()]);
+        let out = check_law_tests(&decls, &tests, &failed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2.rule, DiagnosticRule::FailingLawTest);
+        assert_eq!(out[0].2.severity, Severity::Error);
+    }
+
+    #[test]
+    fn uncovered_still_yields_missing_law_test_warning() {
+        let decls = vec![decl("Money", AlgebraicStructure::Semigroup)];
+        let out = check_law_tests(&decls, &[], &HashSet::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2.rule, DiagnosticRule::MissingLawTest);
+        assert_eq!(out[0].2.severity, Severity::Warning);
+    }
 }
 

@@ -27,6 +27,10 @@ enum Commands {
         /// Infer algebraic structures from impls even without annotations.
         #[arg(long)]
         infer: bool,
+        /// Path to captured `cargo test` output. Law tests that appear in its
+        /// `failures:` block are reported as FailingLawTest (Error).
+        #[arg(long)]
+        test_results: Option<String>,
     },
     /// Generate law-test skeletons for annotated declarations
     Scaffold {
@@ -144,15 +148,25 @@ fn resolve_config_path(explicit: Option<&str>, analyze_path: &std::path::Path) -
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { path, config, baseline, call_graph, infer } => {
+        Commands::Check { path, config, baseline, call_graph, infer, test_results } => {
             use konpu::analyze::baseline;
-            use konpu::analyze::template;
+            use konpu::analyze::{check, template};
             use konpu::domain::konpu::Severity;
             let p = std::path::PathBuf::from(path);
             let config_path = resolve_config_path(config.as_deref(), &p);
             let mut resolved = template::load(&config_path);
             resolved.infer = resolved.infer || infer;
-            let diagnostics = konpu::analyze::analyze_with_config(&p, &resolved);
+            let failed_tests = match test_results {
+                Some(rp) => match std::fs::read_to_string(&rp) {
+                    Ok(out) => check::parse_failed_tests(&out),
+                    Err(e) => {
+                        eprintln!("konpu check: failed to read --test-results {rp}: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                None => std::collections::HashSet::new(),
+            };
+            let diagnostics = konpu::analyze::analyze_with_results(&p, &resolved, &failed_tests).diagnostics;
             let baseline_path = baseline
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(baseline::default_path);

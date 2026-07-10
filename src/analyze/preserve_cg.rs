@@ -341,6 +341,7 @@ mod tests {
         vec![LawTestInfo {
             laws: vec![Law::Associativity],
             enclosing_type: Some(ty.to_string()),
+            test_fn: None,
             path: PathBuf::from("src/domain/money.rs"),
             line: 30,
         }]

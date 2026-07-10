@@ -277,6 +277,9 @@ fn recurse_collect(
 pub struct LawTestInfo {
     pub laws: Vec<Law>,
     pub enclosing_type: Option<String>,
+    /// 直後の `fn` 名。テスト結果（`cargo test` 出力）と突き合わせて
+    /// 通過/不通過を判定するためのキー。抽出できなければ `None`。
+    pub test_fn: Option<String>,
     pub path: PathBuf,
     pub line: usize,
 }
@@ -366,12 +369,32 @@ fn parse_law_attr(attr: Node, source: &str, path: &Path) -> Option<LawTestInfo> 
         return None;
     }
     let enclosing_type = enclosing_impl_type(attr, source);
+    let test_fn = following_fn_name(attr, source);
     Some(LawTestInfo {
         laws,
         enclosing_type,
+        test_fn,
         path: path.to_path_buf(),
         line: attr.start_position().row + 1,
     })
+}
+
+/// アノテーション直後（他の属性・コメントは飛ばす）の `fn` 名を返す。
+fn following_fn_name(attr: Node, source: &str) -> Option<String> {
+    let mut sib = attr.next_sibling();
+    while let Some(n) = sib {
+        match n.kind() {
+            "function_item" => {
+                let name = n.child_by_field_name("name")?;
+                return Some(text_of(name, source).to_string());
+            }
+            "attribute_item" | "attribute" | "line_comment" | "block_comment" => {
+                sib = n.next_sibling();
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
