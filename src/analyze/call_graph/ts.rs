@@ -196,6 +196,11 @@ fn func_name(n: Node, source: &str) -> Option<String> {
     n.child_by_field_name("name").map(|c| text_of(c, source).trim().to_string())
 }
 
+/// 関数/メソッド/arrow の戻り型テキスト（`return_type` フィールドの注釈）。
+fn fn_ret(n: Node, source: &str) -> Option<String> {
+    n.child_by_field_name("return_type").and_then(|ann| type_ann_text(ann, source))
+}
+
 fn collect_funcs(
     n: Node,
     source: &str,
@@ -220,7 +225,8 @@ fn collect_funcs(
     }
     if matches!(n.kind(), "method_definition" | "function_declaration") {
         if let Some(bare) = func_name(n, source) {
-            engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
+            let ret = fn_ret(n, source);
+            engine::register_func(&bare, n, fpath, enclosing, ret.as_deref(), facts, ids, index);
         }
     }
     // `const f = (…) => …` / `const f = function () {}` は TS の支配的な関数定義。
@@ -229,7 +235,8 @@ fn collect_funcs(
         if let (Some(name), Some(value)) = (n.child_by_field_name("name"), n.child_by_field_name("value")) {
             if name.kind() == "identifier" && matches!(value.kind(), "arrow_function" | "function_expression") {
                 let bare = text_of(name, source).trim().to_string();
-                engine::register_func(&bare, value, fpath, enclosing, facts, ids, index);
+                let ret = fn_ret(value, source);
+                engine::register_func(&bare, value, fpath, enclosing, ret.as_deref(), facts, ids, index);
             }
         }
     }
@@ -238,7 +245,8 @@ fn collect_funcs(
         if let Some(value) = n.child_by_field_name("value") {
             if matches!(value.kind(), "arrow_function" | "function_expression") {
                 if let Some(bare) = field_name(n, source) {
-                    engine::register_func(&bare, value, fpath, enclosing, facts, ids, index);
+                    let ret = fn_ret(value, source);
+                    engine::register_func(&bare, value, fpath, enclosing, ret.as_deref(), facts, ids, index);
                 }
             }
         }
@@ -334,7 +342,7 @@ fn collect_calls(
     // enclosing はそのままでよい（bare self 呼びが無いため誤解決しない）。
     if matches!(n.kind(), "method_definition" | "function_declaration") {
         let c = r.ids.get(&n.id()).copied().or(caller);
-        let locals = build_locals(n, source);
+        let locals = build_locals(n, source, r.index, enclosing);
         if let Some(body) = n.child_by_field_name("body") {
             resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
         }
@@ -346,7 +354,7 @@ fn collect_calls(
         if let Some(v) = n.child_by_field_name("value") {
             if matches!(v.kind(), "arrow_function" | "function_expression") {
                 let c = r.ids.get(&v.id()).copied().or(caller);
-                let locals = build_locals(v, source);
+                let locals = build_locals(v, source, r.index, enclosing);
                 if let Some(body) = v.child_by_field_name("body") {
                     resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
                 }
@@ -408,7 +416,7 @@ fn resolve_body(
 }
 
 /// 関数のローカル変数の型（引数 + 本体の `const/let x: T` / `= new T(...)`）。
-fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
+fn build_locals(fn_node: Node, source: &str, index: &Index, enclosing: Option<&str>) -> HashMap<String, String> {
     let mut locals = HashMap::new();
     if let Some(fps) = fn_node.child_by_field_name("parameters") {
         let mut cur = fps.walk();
@@ -421,23 +429,34 @@ fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
         }
     }
     if let Some(body) = fn_node.child_by_field_name("body") {
-        collect_locals(body, source, &mut locals);
+        collect_locals(body, source, index, enclosing, &mut locals);
     }
     locals
 }
 
-fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
+fn collect_locals(
+    n: Node,
+    source: &str,
+    index: &Index,
+    enclosing: Option<&str>,
+    out: &mut HashMap<String, String>,
+) {
     if n.kind() == "variable_declarator" {
         if let Some(name) = n.child_by_field_name("name") {
             if name.kind() == "identifier" {
-                // ponytail: 型は注釈 `const x: T` か構築 `= new T(...)` からのみ拾う。
-                // `const x = foo()`（call 戻り値）や chain `a.b()` はローカルが無型のまま
-                // 残り、その受け手 `x.m()` は Dynamic に落ちる（残差の主因）。精密化するなら
-                // Index に (型,メソッド)→戻り型 を持たせ戻り型伝播する。
+                // 型は注釈 `const x: T`、構築 `= new T(...)`、または呼び出しの戻り型
+                // （`= foo()` / `= recv.m()` の戻り型伝播）。宣言順走査なので
+                // locals-so-far（out）で受け手も解決できる。
+                // ponytail: 索引に無い戻り型（外部 API・複雑な式）は無型のまま → Dynamic。
                 let ty = n
                     .child_by_field_name("type")
                     .and_then(|ann| type_ann_text(ann, source))
-                    .or_else(|| n.child_by_field_name("value").and_then(|v| new_type(v, source)));
+                    .or_else(|| n.child_by_field_name("value").and_then(|v| new_type(v, source)))
+                    .or_else(|| {
+                        n.child_by_field_name("value")
+                            .filter(|v| v.kind() == "call_expression")
+                            .and_then(|v| call_ret_type(v, source, index, enclosing, out))
+                    });
                 if let Some(t) = ty {
                     out.insert(text_of(name, source).trim().to_string(), base_type_name(&t));
                 }
@@ -446,7 +465,29 @@ fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_locals(child, source, out);
+        collect_locals(child, source, index, enclosing, out);
+    }
+}
+
+/// 呼び出し式の戻り型（戻り型伝播）。`foo()` は自由関数の戻り型、`recv.m()` は
+/// 受け手（resolve_receiver。chain の call は再帰でここへ戻る）の型メソッドの戻り型。
+fn call_ret_type(
+    call: Node,
+    source: &str,
+    index: &Index,
+    enclosing: Option<&str>,
+    locals: &HashMap<String, String>,
+) -> Option<String> {
+    let f = call.child_by_field_name("function")?;
+    match f.kind() {
+        "identifier" => index.free_returns.get(text_of(f, source).trim()).cloned(),
+        "member_expression" => {
+            let obj = f.child_by_field_name("object")?;
+            let prop = f.child_by_field_name("property")?;
+            let recv_ty = resolve_receiver(obj, source, enclosing, locals, index)?;
+            index.returns.get(&(recv_ty, text_of(prop, source).trim().to_string())).cloned()
+        }
+        _ => None,
     }
 }
 
@@ -529,6 +570,8 @@ fn resolve_receiver(
             let inner = first_named_child(node)?;
             resolve_receiver(inner, source, enclosing, locals, index)
         }
+        // chain `this.factory().run()`: 呼び出しの戻り型で受け手を解決（戻り型伝播）。
+        "call_expression" => call_ret_type(node, source, index, enclosing, locals),
         _ => None,
     }
 }
@@ -659,6 +702,19 @@ mod tests {
     }
 
     #[test]
+    fn return_type_propagation_types_locals_and_chains() {
+        // `const x = zero()` / chain `zero().combine(x)` / `this.make().combine(x)` が
+        // 戻り型で解決され、同名メソッドの他型へ Dynamic 漏れしない。
+        let f = facts_of(&[(
+            "p.ts",
+            "class Money { combine(o: Money): Money { return o; } }\nclass Other { combine(o: Money): Money { return o; } }\nfunction zero(): Money { return new Money(); }\nclass App {\n  make(): Money { return zero(); }\n  run(): void {\n    const x = zero();\n    x.combine(x);\n    zero().combine(x);\n    this.make().combine(x);\n  }\n}",
+        )]);
+        let edges = edges_from(&f, "App.run");
+        assert!(edges.contains(&"Money.combine".to_string()), "propagated: {edges:?}");
+        assert!(!edges.contains(&"Other.combine".to_string()), "no Dynamic leak: {edges:?}");
+    }
+
+    #[test]
     fn bare_call_prefers_same_file_free_fn() {
         // fp-ts 型のモジュール構成: 各ファイルが同名 export（map 等）を持つ。
         // bare 呼びはレキシカルスコープなので同一ファイル定義のみに結ぶ。
@@ -721,7 +777,7 @@ mod tests {
         // new B(); C is not, so C.pong is pruned.
         let f = facts_of(&[(
             "X.ts",
-            "class B { pong() {} }\nclass C { pong() {} }\nclass X {\n  mk(): B { return new B(); }\n  run() { this.mk().pong(); }\n}",
+            "class B { pong() {} }\nclass C { pong() {} }\nclass X {\n  mk(): B { return new B(); }\n  run() { this.ext().pong(); }\n}",
         )]);
         let cha = CallGraph::build(&f, Precision::Cha);
         let rta = CallGraph::build(&f, Precision::Rta);

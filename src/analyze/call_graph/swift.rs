@@ -213,6 +213,55 @@ fn func_name(n: Node, source: &str) -> Option<String> {
     None
 }
 
+/// 関数/subscript の戻り型テキスト（直下の型ノード。引数の型は parameter 内に
+/// ネストするので混ざらない）。
+fn decl_ret_type(n: Node, source: &str) -> Option<String> {
+    let mut cur = n.walk();
+    n.children(&mut cur)
+        .find(|c| matches!(c.kind(), "user_type" | "optional_type" | "tuple_type" | "array_type" | "dictionary_type"))
+        .map(|c| text_of(c, source).trim().to_string())
+}
+
+/// 呼び出し式の戻り型（戻り型伝播）。`Money(...)` 構築は型そのもの、`foo()` は
+/// 自由関数/暗黙 self メソッドの戻り型、`recv.m()` / chain `zero().m()` は受け手を
+/// （再帰的に）解決して型メソッドの戻り型。
+fn call_ret_type(
+    call: Node,
+    source: &str,
+    index: &Index,
+    enclosing: Option<&str>,
+    locals: &HashMap<String, String>,
+) -> Option<String> {
+    let mut cur = call.walk();
+    let first = call.children(&mut cur).find(|c| c.is_named())?;
+    match first.kind() {
+        "simple_identifier" => {
+            let name = text_of(first, source).trim();
+            if is_pascal_case(name) {
+                return Some(name.to_string()); // 構築
+            }
+            engine::return_type_of(index, enclosing, locals, None, name)
+        }
+        "navigation_expression" => {
+            let method = nav_method(first, source)?;
+            let recv_ty = match nav_base_ident(first, source) {
+                Some(b) => engine::recv_type(&b, enclosing, locals, index),
+                None => nav_call_base(first)
+                    .and_then(|c| call_ret_type(c, source, index, enclosing, locals)),
+            }?;
+            index.returns.get(&(recv_ty, method)).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// navigation の受け手が呼び出し式（chain `zero().m()`）ならその call ノード。
+fn nav_call_base(nav: Node) -> Option<Node> {
+    let mut cur = nav.walk();
+    let base = nav.children(&mut cur).find(|c| c.is_named())?;
+    (base.kind() == "call_expression").then_some(base)
+}
+
 fn collect_funcs(
     n: Node,
     source: &str,
@@ -245,17 +294,23 @@ fn collect_funcs(
         }
         "function_declaration" => {
             if let Some(bare) = func_name(n, source) {
-                engine::register_func(&bare, n, fpath, enclosing, facts, ids, index);
+                let ret = decl_ret_type(n, source);
+                engine::register_func(&bare, n, fpath, enclosing, ret.as_deref(), facts, ids, index);
             }
         }
         // init/deinit/subscript も本体を持つ呼び出し元。bare 名で登録して caller を与える。
-        "init_declaration" => engine::register_func("init", n, fpath, enclosing, facts, ids, index),
-        "deinit_declaration" => engine::register_func("deinit", n, fpath, enclosing, facts, ids, index),
-        "subscript_declaration" => engine::register_func("subscript", n, fpath, enclosing, facts, ids, index),
+        // init の戻り型はその型自身（`let x = T.init(...)` の伝播に効く）。
+        "init_declaration" => engine::register_func("init", n, fpath, enclosing, enclosing, facts, ids, index),
+        "deinit_declaration" => engine::register_func("deinit", n, fpath, enclosing, None, facts, ids, index),
+        "subscript_declaration" => {
+            let ret = decl_ret_type(n, source);
+            engine::register_func("subscript", n, fpath, enclosing, ret.as_deref(), facts, ids, index);
+        }
         // computed property（`var x: T { ... }`）も本体を持つ。プロパティ名で登録。
         "property_declaration" if first_child_of_kind(n, "computed_property").is_some() => {
             if let Some(name) = prop_name(n, source) {
-                engine::register_func(&name, n, fpath, enclosing, facts, ids, index);
+                let ret = prop_type(n, source);
+                engine::register_func(&name, n, fpath, enclosing, ret.as_deref(), facts, ids, index);
             }
         }
         _ => {}
@@ -295,11 +350,11 @@ fn collect_calls(
         "function_declaration" | "init_declaration" | "deinit_declaration" | "subscript_declaration"
     ) {
         let c = r.ids.get(&n.id()).copied().or(caller);
-        let mut locals = build_locals(n, source);
+        let mut locals = build_locals(n, source, r.index, enclosing);
         let body = first_child_of_kind(n, "function_body")
             .or_else(|| first_child_of_kind(n, "computed_property"));
         if let Some(body) = body {
-            collect_locals(body, source, &mut locals);
+            collect_locals(body, source, r.index, enclosing, &mut locals);
             resolve_body(body, source, r, enclosing, &locals, c, facts);
         }
         return;
@@ -311,7 +366,7 @@ fn collect_calls(
         let c = r.ids.get(&n.id()).copied();
         let mut locals = HashMap::new();
         if let Some(body) = first_child_of_kind(n, "computed_property") {
-            collect_locals(body, source, &mut locals);
+            collect_locals(body, source, r.index, enclosing, &mut locals);
             resolve_body(body, source, r, enclosing, &locals, c, facts);
         } else {
             resolve_body(n, source, r, enclosing, &locals, None, facts);
@@ -348,8 +403,9 @@ fn resolve_body(
     }
 }
 
-/// 関数のローカル変数の型（引数 + 本体の `let/var x: T` / `let x = T(...)`）。
-fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
+/// 関数のローカル変数の型（引数 + 本体の `let/var x: T` / `let x = T(...)` /
+/// `let x = foo()` の戻り型伝播）。
+fn build_locals(fn_node: Node, source: &str, index: &Index, enclosing: Option<&str>) -> HashMap<String, String> {
     let mut locals = HashMap::new();
     // 引数。
     let mut cur = fn_node.walk();
@@ -362,26 +418,35 @@ fn build_locals(fn_node: Node, source: &str) -> HashMap<String, String> {
     }
     // 本体のローカル宣言。
     if let Some(body) = first_child_of_kind(fn_node, "function_body") {
-        collect_locals(body, source, &mut locals);
+        collect_locals(body, source, index, enclosing, &mut locals);
     }
     locals
 }
 
-fn collect_locals(n: Node, source: &str, out: &mut HashMap<String, String>) {
+fn collect_locals(
+    n: Node,
+    source: &str,
+    index: &Index,
+    enclosing: Option<&str>,
+    out: &mut HashMap<String, String>,
+) {
     if n.kind() == "property_declaration" {
         if let Some(name) = prop_name(n, source) {
-            // ponytail: 型は注釈 `let x: T` か構築 `let x = T(...)` からのみ拾う。
-            // `let x = foo()`（call 戻り値）や chain `a.b()` はローカルが無型のまま残り、
-            // その受け手 `x.m()` は resolve_call で Dynamic に落ちる（残差の主因）。
-            // 精密化するなら Index に (型,メソッド)→戻り型 を持たせ戻り型伝播する。
             if let Some(t) = prop_type(n, source) {
                 out.insert(name, base_type_name(&t));
+            } else if let Some(call) = first_child_of_kind(n, "call_expression") {
+                // 戻り型伝播: `let x = foo()` / `let x = recv.m()` / `let x = zero().m()`。
+                // 宣言順に走査するので locals-so-far（out）で受け手も解決できる。
+                // ponytail: 索引に無い戻り型（外部 API・クロージャ）は無型のまま → Dynamic。
+                if let Some(t) = call_ret_type(call, source, index, enclosing, out) {
+                    out.insert(name, t);
+                }
             }
         }
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_locals(child, source, out);
+        collect_locals(child, source, index, enclosing, out);
     }
 }
 
@@ -416,7 +481,13 @@ fn resolve_call(
         }
         "navigation_expression" => {
             let Some(method) = nav_method(first, source) else { return };
-            match nav_base_ident(first, source).and_then(|b| recv_type(&b)) {
+            // 受け手: 基底識別子 → 型解決、chain `zero().m()` → 戻り型伝播。
+            let recv_ty = match nav_base_ident(first, source) {
+                Some(b) => recv_type(&b),
+                None => nav_call_base(first)
+                    .and_then(|c| call_ret_type(c, source, index, enclosing, locals)),
+            };
+            match recv_ty {
                 Some(t) => engine::lookup_method(index, &t, &method),
                 None => Resolution::Dynamic(method),
             }
@@ -531,6 +602,19 @@ mod tests {
     }
 
     #[test]
+    fn return_type_propagation_types_locals_and_chains() {
+        // `let x = zero()` のローカルと chain `zero().combine(x)` が戻り型で解決され、
+        // 同名メソッドを持つ他型（Other.combine）へ Dynamic 漏れしない。
+        let f = facts_of(&[(
+            "P.swift",
+            "struct Money {\n  func combine(_ o: Money) -> Money { o }\n}\nstruct Other {\n  func combine(_ o: Money) -> Money { o }\n}\nfunc zero() -> Money { Money() }\nstruct App {\n  func run() {\n    let x = zero()\n    x.combine(x)\n    zero().combine(x)\n  }\n}",
+        )]);
+        let edges = edges_from(&f, "App.run");
+        assert!(edges.contains(&"Money.combine".to_string()), "propagated: {edges:?}");
+        assert!(!edges.contains(&"Other.combine".to_string()), "no Dynamic leak: {edges:?}");
+    }
+
+    #[test]
     fn cha_connects_method_call_across_files() {
         // A.ping calls B().pong(); B.pong calls A().ping() -> a 2-cycle.
         let f = facts_of(&[
@@ -612,12 +696,12 @@ mod tests {
 
     #[test]
     fn unresolved_receiver_falls_back_to_dynamic_and_rta_prunes() {
-        // `mk().pong()` — receiver is a call result (type unknown) -> Dynamic.
-        // Under RTA, only instantiated types' pong survive. B is constructed via
-        // B(); C is not, so C.pong is pruned.
+        // `ext().pong()` — receiver は索引外関数の戻り値（型不明）-> Dynamic。
+        // （`mk().pong()` は戻り型伝播で Static 解決されるようになったため、
+        // 真に解決不能な未定義 callee に変更。）RTA では構築済み型の pong だけ残る。
         let f = facts_of(&[(
             "X.swift",
-            "struct B { func pong() {} }\nstruct C { func pong() {} }\nstruct X {\n  func mk() -> B { B() }\n  func run() { mk().pong() }\n}",
+            "struct B { func pong() {} }\nstruct C { func pong() {} }\nstruct X {\n  func mk() -> B { B() }\n  func run() { ext().pong() }\n}",
         )]);
         let cha = CallGraph::build(&f, Precision::Cha);
         let rta = CallGraph::build(&f, Precision::Rta);

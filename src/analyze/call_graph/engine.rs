@@ -34,6 +34,11 @@ pub(super) struct Index {
     pub(super) free_funcs: HashMap<String, Vec<FuncId>>,
     /// 型 -> (ストアドプロパティ名 -> 基底型名)。受け手が field のとき型解決に使う。
     pub(super) fields: HashMap<String, HashMap<String, String>>,
+    /// (型, メソッド名) -> 戻り値の基底型名。`let x = recv.m()` のローカル型付けと
+    /// chain `a.b().c()` の受け手解決（戻り型伝播）に使う。オーバーロードは先勝ち。
+    pub(super) returns: HashMap<(String, String), String>,
+    /// 自由関数名 -> 戻り値の基底型名。
+    pub(super) free_returns: HashMap<String, String>,
 }
 
 pub(super) enum Resolution {
@@ -137,12 +142,14 @@ pub(super) fn push_resolution(resolved: Resolution, caller: Option<FuncId>, fact
 }
 
 /// 関数定義 1 件の登録: qualified 名で facts に追加し、impl（CHA/RTA 用）と
-/// 精密解決索引（型メソッド or 自由関数）に載せる。
+/// 精密解決索引（型メソッド or 自由関数）に載せる。`ret` は戻り型テキスト
+/// （戻り型伝播の索引。無型なら None）。
 pub(super) fn register_func(
     bare: &str,
     node: Node,
     fpath: &Path,
     enclosing: Option<&str>,
+    ret: Option<&str>,
     facts: &mut Facts,
     ids: &mut HashMap<usize, FuncId>,
     index: &mut Index,
@@ -161,6 +168,44 @@ pub(super) fn register_func(
     match enclosing {
         Some(t) => index.type_methods.entry((t.to_string(), bare.to_string())).or_default().push(id),
         None => index.free_funcs.entry(bare.to_string()).or_default().push(id),
+    }
+    if let Some(rt) = ret {
+        let rt = base_type_name(rt);
+        if !rt.is_empty() {
+            match enclosing {
+                Some(t) => {
+                    index.returns.entry((t.to_string(), bare.to_string())).or_insert(rt);
+                }
+                None => {
+                    index.free_returns.entry(bare.to_string()).or_insert(rt);
+                }
+            }
+        }
+    }
+}
+
+/// 呼び出しの戻り型を索引から引く（戻り型伝播）。`receiver_base` が None なら
+/// bare 呼び（暗黙 self メソッド → 自由関数）、Some なら受け手を解決して型メソッド。
+pub(super) fn return_type_of(
+    index: &Index,
+    enclosing: Option<&str>,
+    locals: &HashMap<String, String>,
+    receiver_base: Option<&str>,
+    callee: &str,
+) -> Option<String> {
+    match receiver_base {
+        None => {
+            if let Some(t) = enclosing {
+                if let Some(r) = index.returns.get(&(t.to_string(), callee.to_string())) {
+                    return Some(r.clone());
+                }
+            }
+            index.free_returns.get(callee).cloned()
+        }
+        Some(base) => {
+            let t = recv_type(base, enclosing, locals, index)?;
+            index.returns.get(&(t, callee.to_string())).cloned()
+        }
     }
 }
 
