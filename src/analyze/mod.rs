@@ -2,6 +2,7 @@ pub mod baseline;
 pub mod call_graph;
 pub mod check;
 pub mod extract;
+pub mod extract_swift;
 pub mod infer;
 pub mod parser;
 #[cfg(feature = "call-graph")]
@@ -84,6 +85,34 @@ pub fn analyze_full_with_cg(
     r
 }
 
+/// 1 ファイル分の抽出結果。言語別抽出器（`extract` / `extract_swift`）が返す
+/// 共通バンドル。中身はすべて言語非依存のコア構造体。
+pub struct FileExtract {
+    pub decls: Vec<extract::AnalyzedDeclaration>,
+    pub impls: Vec<extract::ImplInfo>,
+    pub free_fns: Vec<extract::MethodInfo>,
+    pub law_tests: Vec<extract::LawTestInfo>,
+    pub ignores: Vec<extract::IgnoreInfo>,
+    pub uses: Vec<extract::UseStatement>,
+    pub type_sites: Vec<(String, PathBuf, usize)>,
+    pub type_infos: Vec<propagation::TypeInfo>,
+}
+
+impl FileExtract {
+    pub fn empty() -> Self {
+        FileExtract {
+            decls: Vec::new(),
+            impls: Vec::new(),
+            free_fns: Vec::new(),
+            law_tests: Vec::new(),
+            ignores: Vec::new(),
+            uses: Vec::new(),
+            type_sites: Vec::new(),
+            type_infos: Vec::new(),
+        }
+    }
+}
+
 /// 抽出フェーズの成果物。
 struct Extracted {
     decls: Vec<extract::AnalyzedDeclaration>,
@@ -101,9 +130,9 @@ fn analyze_full_body(
     config: &template::ResolvedConfig,
     failed_tests: &std::collections::HashSet<String>,
 ) -> AnalysisResult {
-    let files: Vec<PathBuf> = parser::collect_rust_files(path)
+    let files: Vec<(PathBuf, parser::Language)> = parser::collect_source_files(path)
         .into_iter()
-        .filter(|f| !config.is_excluded(f, path))
+        .filter(|(f, _)| !config.is_excluded(f, path))
         .collect();
     // glob 照合の基準。ディレクトリ解析ならそのディレクトリ（外部プロジェクトを
     // 別 CWD から解析しても合う）、単一ファイル解析ならプロジェクトルート＝CWD 想定。
@@ -130,7 +159,7 @@ fn analyze_full_body(
 
 /// フェーズ1: 全ファイルから宣言・impl・law test・ignore・use を抽出し、
 /// 各宣言の伝播度を算出する。`infer` が真ならアノテーション無しの型も推論して足す。
-fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
+fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted {
     let mut ex = Extracted {
         decls: Vec::new(),
         impls: Vec::new(),
@@ -142,23 +171,29 @@ fn extract_all(files: &[PathBuf], infer: bool) -> Extracted {
     let mut type_infos = Vec::new();
     let mut type_sites: std::collections::HashMap<String, (PathBuf, usize)> =
         std::collections::HashMap::new();
-    for file in files {
-        let Some((_, tree)) = parser::parse_file(file) else {
-            continue;
-        };
+    for (file, lang) in files {
         let Ok(source) = std::fs::read_to_string(file) else {
             continue;
         };
+        let Some(tree) = parser::parse_with(&source, *lang) else {
+            continue;
+        };
         let root = tree.root_node();
-        ex.decls.extend(extract::extract_declarations(root, &source, file));
-        ex.impls.extend(extract::extract_impls(root, &source));
-        ex.free_fns.extend(extract::extract_free_fns(root, &source));
-        ex.law_tests.extend(extract::extract_law_tests(root, &source, file));
-        ex.ignores.extend(extract::extract_ignores(root, &source, file));
-        type_infos.extend(propagation::extract_type_infos(root, &source));
-        ex.uses.extend(extract::extract_use_statements(root, &source, file));
+        // 言語別抽出。どちらも同じコア構造体（ImplInfo/MethodInfo/…）を返すので
+        // 下流の check/infer/template は言語非依存のまま。
+        let e = match lang {
+            parser::Language::Rust => extract::extract_all_file(root, &source, file),
+            parser::Language::Swift => extract_swift::extract_all_file(root, &source, file),
+        };
+        ex.decls.extend(e.decls);
+        ex.impls.extend(e.impls);
+        ex.free_fns.extend(e.free_fns);
+        ex.law_tests.extend(e.law_tests);
+        ex.ignores.extend(e.ignores);
+        ex.uses.extend(e.uses);
+        type_infos.extend(e.type_infos);
         if infer {
-            for (name, path, line) in extract::extract_type_sites(root, &source, file) {
+            for (name, path, line) in e.type_sites {
                 type_sites.entry(name).or_insert((path, line));
             }
         }

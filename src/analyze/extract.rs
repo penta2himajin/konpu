@@ -177,6 +177,20 @@ fn structure_from_attr(attr_text: &str) -> Option<AlgebraicStructure> {
     }
 }
 
+/// Rust ファイル 1 つから全成果物を抽出してバンドルで返す（言語ディスパッチ用）。
+pub fn extract_all_file(root: Node, source: &str, path: &Path) -> super::FileExtract {
+    super::FileExtract {
+        decls: extract_declarations(root, source, path),
+        impls: extract_impls(root, source),
+        free_fns: extract_free_fns(root, source),
+        law_tests: extract_law_tests(root, source, path),
+        ignores: extract_ignores(root, source, path),
+        uses: extract_use_statements(root, source, path),
+        type_sites: extract_type_sites(root, source, path),
+        type_infos: super::propagation::extract_type_infos(root, source),
+    }
+}
+
 pub fn extract_declarations(
     root: Node,
     source: &str,
