@@ -78,45 +78,45 @@ pub fn infer_declarations(
         let Some((path, line)) = type_sites.get(ty) else {
             continue; // 宣言サイト不明（外部型など）はアンカーできないので skip。
         };
-        if let Some(decl) = infer_one(ty, &methods, path.clone(), *line) {
-            out.push(decl);
-        }
+        out.extend(infer_all(ty, &methods, path.clone(), *line));
     }
     out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
     out
 }
 
-fn infer_one(ty: &str, methods: &[&MethodInfo], path: PathBuf, line: usize) -> Option<AnalyzedDeclaration> {
-    // 族の優先順に、閉じた二項演算メソッドを持つ最初の族を選ぶ。
-    let (op, fam) = FAMILIES.iter().find_map(|fam| {
-        fam.ops
-            .iter()
-            .find_map(|&name| pick(methods, name, |m| is_binary_op(m, ty)))
-            .map(|op| (op, fam))
-    })?;
-    // identity / inverse は選んだ族の慣用名からのみ拾う（非整合な組み合わせを防ぐ）。
-    let id = fam.ids.iter().find_map(|&name| pick(methods, name, |m| is_identity(m, ty)));
-    let inv = fam.invs.iter().find_map(|&name| pick(methods, name, |m| is_inverse(m, ty)));
+/// 型 `ty` の各演算族について、閉じた二項演算を持つ族ごとに1宣言を出す。
+/// リング型（加法 Group + 乗法 Monoid）のように、1つの型が複数の代数構造を
+/// 持つ場合は複数の宣言を返す。ops が全族で互いに素なので二重計上は起きない。
+fn infer_all(ty: &str, methods: &[&MethodInfo], path: PathBuf, line: usize) -> Vec<AnalyzedDeclaration> {
+    FAMILIES
+        .iter()
+        .filter_map(|fam| {
+            let op = fam.ops.iter().find_map(|&name| pick(methods, name, |m| is_binary_op(m, ty)))?;
+            // identity / inverse は選んだ族の慣用名からのみ拾う（非整合な組み合わせを防ぐ）。
+            let id = fam.ids.iter().find_map(|&name| pick(methods, name, |m| is_identity(m, ty)));
+            let inv = fam.invs.iter().find_map(|&name| pick(methods, name, |m| is_inverse(m, ty)));
 
-    let structure = match (id.is_some(), inv.is_some()) {
-        (true, true) => AlgebraicStructure::Group,
-        (true, false) => AlgebraicStructure::Monoid,
-        _ => AlgebraicStructure::Semigroup, // 演算のみ（単位元無しの逆元は無視）
-    };
-    let identity_name = (structure.rank() >= 2).then(|| id.unwrap().name.clone());
-    let inverse_name = (structure.rank() >= 3).then(|| inv.unwrap().name.clone());
+            let structure = match (id.is_some(), inv.is_some()) {
+                (true, true) => AlgebraicStructure::Group,
+                (true, false) => AlgebraicStructure::Monoid,
+                _ => AlgebraicStructure::Semigroup, // 演算のみ（単位元無しの逆元は無視）
+            };
+            let identity_name = (structure.rank() >= 2).then(|| id.unwrap().name.clone());
+            let inverse_name = (structure.rank() >= 3).then(|| inv.unwrap().name.clone());
 
-    Some(AnalyzedDeclaration {
-        target_structure: structure,
-        higher_kinded: None,
-        type_name: ty.to_string(),
-        operation_name: op.name.clone(),
-        identity_name,
-        inverse_name,
-        path,
-        line,
-        propagation: None,
-    })
+            Some(AnalyzedDeclaration {
+                target_structure: structure,
+                higher_kinded: None,
+                type_name: ty.to_string(),
+                operation_name: op.name.clone(),
+                identity_name,
+                inverse_name,
+                path: path.clone(),
+                line,
+                propagation: None,
+            })
+        })
+        .collect()
 }
 
 /// 名前が一致し述語を満たす最初のメソッドを返す。
@@ -200,9 +200,34 @@ mod tests {
         }
     }
 
-    fn infer(ty: &str, methods: Vec<MethodInfo>) -> Option<AnalyzedDeclaration> {
+    fn infer_all_t(ty: &str, methods: Vec<MethodInfo>) -> Vec<AnalyzedDeclaration> {
         let refs: Vec<&MethodInfo> = methods.iter().collect();
-        infer_one(ty, &refs, PathBuf::from("src/x.rs"), 1)
+        infer_all(ty, &refs, PathBuf::from("src/x.rs"), 1)
+    }
+
+    fn infer(ty: &str, methods: Vec<MethodInfo>) -> Option<AnalyzedDeclaration> {
+        infer_all_t(ty, methods).into_iter().next()
+    }
+
+    #[test]
+    fn ring_yields_additive_group_and_multiplicative_monoid() {
+        // A ring-like type: additive Group (add/zero/neg) AND multiplicative
+        // Monoid (mul/one). Both structures must be inferred, not just the first.
+        let decls = infer_all_t("R", vec![
+            method("add", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
+            method("zero", None, &[], Some("Self"), true),
+            method("neg", Some(SelfKind::Owned), &[], Some("Self"), false),
+            method("mul", Some(SelfKind::Owned), &["Self"], Some("Self"), false),
+            method("one", None, &[], Some("Self"), true),
+        ]);
+        assert_eq!(decls.len(), 2);
+        let add = decls.iter().find(|d| d.operation_name == "add").unwrap();
+        assert_eq!(add.target_structure, AlgebraicStructure::Group);
+        assert_eq!(add.inverse_name.as_deref(), Some("neg"));
+        let mul = decls.iter().find(|d| d.operation_name == "mul").unwrap();
+        assert_eq!(mul.target_structure, AlgebraicStructure::Monoid);
+        assert_eq!(mul.identity_name.as_deref(), Some("one"));
+        assert!(mul.inverse_name.is_none());
     }
 
     #[test]
