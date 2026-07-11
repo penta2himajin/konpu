@@ -21,15 +21,17 @@
 //! 精度モデル（Swift/Kotlin と共通）: 型が解決できたら Static、解決できたが index 外なら
 //! External（エッジ無し）、本当に未解決なら Dynamic（同名全てに繋ぐ過大近似）。
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
 use konpu_cg::{Facts, FuncId};
 
 use super::engine::{
-    self, base_type_name, first_named_child, is_pascal_case, text_of, Index, Resolution, Resolver,
+    self, base_type_name, first_child_of_kind, first_named_child, is_pascal_case, text_of, Index,
+    Resolution, Resolver,
 };
 use super::{FnSig, MergeConstruction};
 use crate::analyze::parser::Language;
@@ -52,13 +54,102 @@ pub fn facts_from_ts_project(path: &Path, config: &ResolvedConfig) -> Facts {
     facts_from_ts_sources(engine::project_sources(path, config, Language::Ts))
 }
 
+/// ファイルの import 束縛（bare / namespace 呼びの解決用）。
+#[derive(Default)]
+struct FileImports {
+    /// named import のローカル名 → (解決先ファイル, export 側の元名)。
+    /// `import { map as m } from './O'` → m → (O.ts, map)。
+    named: HashMap<String, (PathBuf, String)>,
+    /// namespace alias → 解決先ファイル（`import * as O from './O'` → O→O.ts）。
+    ns: HashMap<String, PathBuf>,
+}
+
+/// import 文からローカル束縛を集める。相対指定子は modulegraph の resolve_ts で
+/// 実ファイルへ解決（bare 指定子=外部は束縛しない）。default import は export 側の
+/// 実名が判らないので束縛しない（miss、健全）。
+fn extract_import_bindings(
+    root: Node,
+    source: &str,
+    importer_dir: &str,
+    known: &BTreeSet<String>,
+) -> FileImports {
+    let mut out = FileImports::default();
+    let mut cur = root.walk();
+    for stmt in root.children(&mut cur) {
+        if stmt.kind() != "import_statement" {
+            continue;
+        }
+        let Some(spec) = stmt
+            .child_by_field_name("source")
+            .and_then(|sn| first_child_of_kind(sn, "string_fragment"))
+            .map(|f| text_of(f, source).to_string())
+        else {
+            continue;
+        };
+        let Some(target) = crate::analyze::module_graph::resolve_ts(&spec, importer_dir, known) else {
+            continue; // 外部パッケージ / 解決不能。
+        };
+        let target = PathBuf::from(target);
+        let Some(clause) = first_child_of_kind(stmt, "import_clause") else { continue };
+        let mut c2 = clause.walk();
+        for part in clause.children(&mut c2) {
+            match part.kind() {
+                "named_imports" => {
+                    let mut c3 = part.walk();
+                    for is in part.children(&mut c3) {
+                        if is.kind() != "import_specifier" {
+                            continue;
+                        }
+                        // 元名 = 最初の identifier、ローカル束縛名 = 最後（`as` 無しなら同一）。
+                        let mut c4 = is.walk();
+                        let idents: Vec<Node> =
+                            is.children(&mut c4).filter(|c| c.kind() == "identifier").collect();
+                        if let (Some(orig), Some(local)) = (idents.first(), idents.last()) {
+                            out.named.insert(
+                                text_of(*local, source).trim().to_string(),
+                                (target.clone(), text_of(*orig, source).trim().to_string()),
+                            );
+                        }
+                    }
+                }
+                "namespace_import" => {
+                    if let Some(id) = first_child_of_kind(part, "identifier") {
+                        out.ns.insert(text_of(id, source).trim().to_string(), target.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// (path, source) の集合から Facts を構築する（テスト・in-memory 用）。
 pub fn facts_from_ts_sources(sources: Vec<(std::path::PathBuf, String)>) -> Facts {
+    // import 束縛は Pass 1 で root から抽出して貯め、Pass 2 の解決で使う。
+    let known: BTreeSet<String> =
+        sources.iter().map(|(p, _)| p.to_string_lossy().replace('\\', "/")).collect();
+    let imports: RefCell<HashMap<PathBuf, FileImports>> = RefCell::new(HashMap::new());
+    let empty = FileImports::default();
     engine::facts_from_sources(
         Language::Ts,
         sources,
-        |root, src, fpath, facts, ids, index| collect_funcs(root, src, fpath, None, facts, ids, index),
-        |root, src, fpath, r, facts| collect_calls(root, src, fpath, r, None, None, facts),
+        |root, src, fpath, facts, ids, index| {
+            let rel = fpath.to_string_lossy().replace('\\', "/");
+            let dir = match rel.rfind('/') {
+                Some(i) => rel[..i].to_string(),
+                None => String::new(),
+            };
+            imports
+                .borrow_mut()
+                .insert(fpath.to_path_buf(), extract_import_bindings(root, src, &dir, &known));
+            collect_funcs(root, src, fpath, None, facts, ids, index)
+        },
+        |root, src, fpath, r, facts| {
+            let map = imports.borrow();
+            let fi = map.get(fpath).unwrap_or(&empty);
+            collect_calls(root, src, fpath, fi, r, None, None, facts)
+        },
     )
 }
 
@@ -223,7 +314,12 @@ fn collect_funcs(
         }
         return;
     }
-    if matches!(n.kind(), "method_definition" | "function_declaration") {
+    // 本体の無い宣言（overload シグネチャ・abstract・ambient decl）は呼び出し実体では
+    // ないので登録しない。fp-ts 流の多段 overload（pipe は 20+ 本）を各 1 関数として
+    // 登録すると、1 呼びが overload 数分のエッジに膨らむ。
+    if matches!(n.kind(), "method_definition" | "function_declaration")
+        && n.child_by_field_name("body").is_some()
+    {
         if let Some(bare) = func_name(n, source) {
             let ret = fn_ret(n, source);
             engine::register_func(&bare, n, fpath, enclosing, ret.as_deref(), facts, ids, index);
@@ -317,10 +413,12 @@ fn field_type(n: Node, source: &str) -> Option<String> {
     n.child_by_field_name("value").and_then(|v| new_type(v, source))
 }
 
+#[allow(clippy::too_many_arguments)] // 文脈スレッディング。構造体化は間接化が勝るだけ。
 fn collect_calls(
     n: Node,
     source: &str,
     fpath: &Path,
+    imports: &FileImports,
     r: &Resolver,
     enclosing: Option<&str>,
     caller: Option<FuncId>,
@@ -332,7 +430,7 @@ fn collect_calls(
         if let Some(body) = n.child_by_field_name("body") {
             let mut cur = body.walk();
             for child in body.children(&mut cur) {
-                collect_calls(child, source, fpath, r, ty.as_deref(), caller, facts);
+                collect_calls(child, source, fpath, imports, r, ty.as_deref(), caller, facts);
             }
         }
         return;
@@ -344,7 +442,7 @@ fn collect_calls(
         let c = r.ids.get(&n.id()).copied().or(caller);
         let locals = build_locals(n, source, r.index, enclosing);
         if let Some(body) = n.child_by_field_name("body") {
-            resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
+            resolve_body(body, source, fpath, imports, r, enclosing, &locals, c, facts);
         }
         return;
     }
@@ -356,18 +454,18 @@ fn collect_calls(
                 let c = r.ids.get(&v.id()).copied().or(caller);
                 let locals = build_locals(v, source, r.index, enclosing);
                 if let Some(body) = v.child_by_field_name("body") {
-                    resolve_body(body, source, fpath, r, enclosing, &locals, c, facts);
+                    resolve_body(body, source, fpath, imports, r, enclosing, &locals, c, facts);
                 }
             } else {
                 let locals = HashMap::new();
-                resolve_body(v, source, fpath, r, enclosing, &locals, None, facts);
+                resolve_body(v, source, fpath, imports, r, enclosing, &locals, None, facts);
             }
         }
         return;
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        collect_calls(child, source, fpath, r, enclosing, caller, facts);
+        collect_calls(child, source, fpath, imports, r, enclosing, caller, facts);
     }
 }
 
@@ -378,6 +476,7 @@ fn resolve_body(
     n: Node,
     source: &str,
     fpath: &Path,
+    imports: &FileImports,
     r: &Resolver,
     enclosing: Option<&str>,
     locals: &HashMap<String, String>,
@@ -386,7 +485,7 @@ fn resolve_body(
 ) {
     match n.kind() {
         "function_declaration" => {
-            collect_calls(n, source, fpath, r, enclosing, caller, facts);
+            collect_calls(n, source, fpath, imports, r, enclosing, caller, facts);
             return;
         }
         // ネストした `const g = () => …`（Pass 1 で登録済み）は g 自身の caller で再入。
@@ -395,7 +494,7 @@ fn resolve_body(
                 matches!(v.kind(), "arrow_function" | "function_expression") && r.ids.contains_key(&v.id())
             });
             if is_registered_fn {
-                collect_calls(n, source, fpath, r, enclosing, caller, facts);
+                collect_calls(n, source, fpath, imports, r, enclosing, caller, facts);
                 return;
             }
         }
@@ -405,25 +504,29 @@ fn resolve_body(
             }
         }
         "call_expression" => {
-            resolve_call(n, source, fpath, r.index, enclosing, locals, caller, facts);
+            resolve_call(n, source, fpath, imports, r.index, enclosing, locals, caller, facts);
         }
         _ => {}
     }
     let mut cur = n.walk();
     for child in n.children(&mut cur) {
-        resolve_body(child, source, fpath, r, enclosing, locals, caller, facts);
+        resolve_body(child, source, fpath, imports, r, enclosing, locals, caller, facts);
     }
 }
 
 /// 関数のローカル変数の型（引数 + 本体の `const/let x: T` / `= new T(...)`）。
+/// 型が判らない引数/局所も **空型 ""** で入れる（束縛名の在否だけ効く）。bare 呼び
+/// `f(a)` が「同名自由関数」でなく higher-order 値呼び（＝エッジ無し）だと判定するのに
+/// 局所名の集合が要るため。受け手型解決側（resolve_receiver）は空型を無視する。
 fn build_locals(fn_node: Node, source: &str, index: &Index, enclosing: Option<&str>) -> HashMap<String, String> {
     let mut locals = HashMap::new();
     if let Some(fps) = fn_node.child_by_field_name("parameters") {
         let mut cur = fps.walk();
         for p in fps.children(&mut cur) {
             if matches!(p.kind(), "required_parameter" | "optional_parameter") {
-                if let (Some(name), Some(t)) = (param_name(p, source), param_type(p, source)) {
-                    locals.insert(name, base_type_name(&t));
+                if let Some(name) = param_name(p, source) {
+                    let t = param_type(p, source).map(|t| base_type_name(&t)).unwrap_or_default();
+                    locals.insert(name, t);
                 }
             }
         }
@@ -457,9 +560,11 @@ fn collect_locals(
                             .filter(|v| v.kind() == "call_expression")
                             .and_then(|v| call_ret_type(v, source, index, enclosing, out))
                     });
-                if let Some(t) = ty {
-                    out.insert(text_of(name, source).trim().to_string(), base_type_name(&t));
-                }
+                // 型が判らない局所も空型で入れる（束縛名の在否が bare 値呼び判定に効く）。
+                out.insert(
+                    text_of(name, source).trim().to_string(),
+                    ty.map(|t| base_type_name(&t)).unwrap_or_default(),
+                );
             }
         }
     }
@@ -497,6 +602,7 @@ fn resolve_call(
     call: Node,
     source: &str,
     fpath: &Path,
+    imports: &FileImports,
     index: &Index,
     enclosing: Option<&str>,
     locals: &HashMap<String, String>,
@@ -510,12 +616,56 @@ fn resolve_call(
         // 修飾必須なので enclosing は見ない。同一ファイルの自由関数が在れば必ずそれ
         // （import はファイル内定義に負ける）。無ければ全ファイルの同名（import 先の
         // 過大近似、健全）。PascalCase 構築は `new`（別ノード）なのでここでは扱わない。
-        "identifier" => resolve_bare_ts(index, facts, text_of(func, source).trim(), fpath),
+        "identifier" => {
+            let name = text_of(func, source).trim();
+            // 1. 同一ファイルの登録済み自由関数（`const g = ()=>…` 含む）ならレキシカルに
+            //    必ずそれ。ネスト arrow const の呼びはここで解決する。
+            let same_file: Vec<FuncId> = index
+                .free_funcs
+                .get(name)
+                .map(|ids| ids.iter().copied().filter(|&i| facts.funcs[i].path == fpath).collect())
+                .unwrap_or_default();
+            if !same_file.is_empty() {
+                Resolution::Targets(same_file)
+            } else if locals.contains_key(name) {
+                // 2. 局所/引数の呼び `f(a)` は higher-order 値呼び（fp-ts の `f: (a)=>b` を
+                //    `f(a)` する定番）。同名の別ファイル自由関数とは無関係＝エッジ無し。
+                //    TS に callable-value 規約は無いので、Swift/Kotlin の callAsFunction/
+                //    invoke → External と同じ結論をローカル判定で直接出す。
+                return;
+            } else {
+                // 3. import 束縛先 → 同名全体（再 export の過大近似）→ Dynamic。
+                resolve_bare_ts(index, facts, name, fpath, imports)
+            }
+        }
         // メンバ呼び `recv.method()`。
         "member_expression" => {
             let Some(prop) = func.child_by_field_name("property") else { return };
             let method = text_of(prop, source).trim().to_string();
             let recv = func.child_by_field_name("object");
+            // namespace import 経由の自由関数呼び `O.map(...)`: alias → 解決先ファイルの
+            // 自由関数。見つからない（再 export・型のみ）場合はエッジ無し — 従来も
+            // PascalCase 型扱いの External で落ちていたので後退しない。
+            if let Some(obj) = recv {
+                if obj.kind() == "identifier" {
+                    if let Some(target) = imports.ns.get(text_of(obj, source).trim()) {
+                        let resolved = index
+                            .free_funcs
+                            .get(&method)
+                            .map(|ids| {
+                                ids.iter()
+                                    .copied()
+                                    .filter(|&i| &facts.funcs[i].path == target)
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|v| !v.is_empty())
+                            .map(Resolution::Targets)
+                            .unwrap_or(Resolution::External);
+                        engine::push_resolution(resolved, caller, facts);
+                        return;
+                    }
+                }
+            }
             match recv.and_then(|o| resolve_receiver(o, source, enclosing, locals, index)) {
                 Some(t) => engine::lookup_method(index, &t, &method),
                 None => Resolution::Dynamic(method),
@@ -527,12 +677,34 @@ fn resolve_call(
     engine::push_resolution(resolved, caller, facts);
 }
 
-/// TS の bare 呼び解決: 同一ファイルの自由関数優先 → 全ファイル → Dynamic。
-fn resolve_bare_ts(index: &Index, facts: &Facts, name: &str, file: &Path) -> Resolution {
+/// TS の bare 呼び解決（レキシカルスコープ順）: 同一ファイルの自由関数 →
+/// named import の解決先ファイルの定義（alias は元名で照合）→ 同名全ファイル
+/// （再 export 等の過大近似、偽陰性を出さない）→ Dynamic。
+fn resolve_bare_ts(
+    index: &Index,
+    facts: &Facts,
+    name: &str,
+    file: &Path,
+    imports: &FileImports,
+) -> Resolution {
     if let Some(ids) = index.free_funcs.get(name) {
         let local: Vec<FuncId> =
             ids.iter().copied().filter(|&i| facts.funcs[i].path == file).collect();
-        return Resolution::Targets(if local.is_empty() { ids.clone() } else { local });
+        if !local.is_empty() {
+            return Resolution::Targets(local);
+        }
+    }
+    if let Some((target, orig)) = imports.named.get(name) {
+        if let Some(ids) = index.free_funcs.get(orig) {
+            let imported: Vec<FuncId> =
+                ids.iter().copied().filter(|&i| &facts.funcs[i].path == target).collect();
+            // 解決先に実体が無い（再 export 等）→ 同名全体の過大近似。
+            return Resolution::Targets(if imported.is_empty() { ids.clone() } else { imported });
+        }
+        return Resolution::Dynamic(orig.clone());
+    }
+    if let Some(ids) = index.free_funcs.get(name) {
+        return Resolution::Targets(ids.clone());
     }
     Resolution::Dynamic(name.to_string())
 }
@@ -556,7 +728,9 @@ fn resolve_receiver(
             if is_pascal_case(name) {
                 Some(name.to_string())
             } else {
-                locals.get(name).cloned()
+                // 空型（型注釈の無い局所）は「型不明」＝解決不能 → None（呼びは Dynamic
+                // に落ちて同名メソッド全体の過大近似。局所名の在否だけで型を捏造しない）。
+                locals.get(name).filter(|t| !t.is_empty()).cloned()
             }
         }
         "member_expression" => {
@@ -712,6 +886,51 @@ mod tests {
         let edges = edges_from(&f, "App.run");
         assert!(edges.contains(&"Money.combine".to_string()), "propagated: {edges:?}");
         assert!(!edges.contains(&"Other.combine".to_string()), "no Dynamic leak: {edges:?}");
+    }
+
+    #[test]
+    fn higher_order_param_call_does_not_leak_to_same_named_free_fn() {
+        // fp-ts の定番: `map = (f) => (a) => f(a)`。`f(a)` は引数の値呼びなので、
+        // 別ファイルの自由関数 `f` に繋いではいけない（過大近似の主因だった）。
+        let f = facts_of(&[
+            ("map.ts", "export const map = (f: (n: number) => number) => (a: number): number => f(a);"),
+            ("other.ts", "export function f(x: number): number { return x; }"),
+        ]);
+        // map 本体（外側 arrow）から f への偽エッジが無い。
+        let mid = f.funcs.iter().position(|x| x.name == "map").unwrap();
+        let g = CallGraph::build(&f, Precision::Cha);
+        let targets: Vec<&str> = g.edges[mid].iter().map(|&t| f.funcs[t].name.as_str()).collect();
+        assert!(!targets.contains(&"f"), "no edge to unrelated free fn f: {targets:?}");
+    }
+
+    #[test]
+    fn overload_signatures_are_not_registered_as_functions() {
+        // fp-ts 流: 本体なし overload シグネチャ複数 + 実装1本。実装だけが関数。
+        let f = facts_of(&[(
+            "o.ts",
+            "export function pipe(a: number): number;\nexport function pipe(a: number, b: number): number;\nexport function pipe(...args: number[]): number { return 0; }\nexport const go = (): number => pipe(1);",
+        )]);
+        let pipes = f.funcs.iter().filter(|x| x.name == "pipe").count();
+        assert_eq!(pipes, 1, "only the implementation registers");
+        assert_eq!(edges_from(&f, "go"), vec!["pipe".to_string()], "one call → one edge");
+    }
+
+    #[test]
+    fn imported_bare_and_namespace_calls_resolve_to_source_file() {
+        let f = facts_of(&[
+            ("A.ts", "export const map = (x: number): number => x;"),
+            ("C.ts", "export const map = (x: number): number => x;"),
+            ("B.ts", "import { map } from './A';\nimport { map as m } from './A';\nimport * as O from './A';\nexport const useNamed = (): number => map(1);\nexport const useAlias = (): number => m(1);\nexport const useNs = (): number => O.map(1);\nexport const useNsMiss = (): number => O.nope(1);"),
+        ]);
+        let g = CallGraph::build(&f, Precision::Cha);
+        let paths_of = |caller: &str| -> Vec<String> {
+            let cid = f.funcs.iter().position(|x| x.name == caller).unwrap();
+            g.edges[cid].iter().map(|&t| f.funcs[t].path.to_string_lossy().to_string()).collect()
+        };
+        assert_eq!(paths_of("useNamed"), vec!["A.ts"], "named import → 解決先ファイルのみ");
+        assert_eq!(paths_of("useAlias"), vec!["A.ts"], "alias は元名で解決");
+        assert_eq!(paths_of("useNs"), vec!["A.ts"], "namespace member → 解決先の自由関数");
+        assert!(paths_of("useNsMiss").is_empty(), "解決先に無い ns member はエッジ無し");
     }
 
     #[test]

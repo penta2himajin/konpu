@@ -144,6 +144,7 @@ pub(super) fn push_resolution(resolved: Resolution, caller: Option<FuncId>, fact
 /// 関数定義 1 件の登録: qualified 名で facts に追加し、impl（CHA/RTA 用）と
 /// 精密解決索引（型メソッド or 自由関数）に載せる。`ret` は戻り型テキスト
 /// （戻り型伝播の索引。無型なら None）。
+#[allow(clippy::too_many_arguments)] // 3言語から呼ぶ登録一式。構造体化は間接化が勝るだけ。
 pub(super) fn register_func(
     bare: &str,
     node: Node,

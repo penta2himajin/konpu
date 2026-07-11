@@ -249,7 +249,8 @@ fn dir_of(rel: &str) -> String {
 }
 
 /// TS 相対 import を対象ファイルへ解決する。相対（`.`/`..`）のみ。bare（`zod` 等）は外部。
-fn resolve_ts(spec: &str, importer_dir: &str, known: &BTreeSet<String>) -> Option<String> {
+/// call_graph::ts の import 束縛解決からも再利用する（pub(crate) はそのため）。
+pub(crate) fn resolve_ts(spec: &str, importer_dir: &str, known: &BTreeSet<String>) -> Option<String> {
     if !spec.starts_with('.') {
         return None; // bare specifier = 外部パッケージ。
     }
