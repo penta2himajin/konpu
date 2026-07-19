@@ -155,7 +155,9 @@ fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], singletons: &[String], n
 /// パス修飾は Rust の `::` と TS/Swift/Kotlin の `.`（`M.Money` 等）の両方を剥がす。
 fn is_float_ty(t: &str) -> bool {
     let t = t.trim().trim_start_matches('&').trim();
-    t == "f64" || t == "f32"
+    // Rust f32/f64, Kotlin/Swift Double/Float. TS `number` is deliberately absent:
+    // it conflates int and float, so flagging every numeric monoid would be noise.
+    matches!(t, "f64" | "f32" | "Double" | "Float")
 }
 
 /// Does the carrier type resolve to (or transitively contain) a floating-point
@@ -665,6 +667,22 @@ MoneyTest > zeroIsRightIdentity() FAILED";
         let out = check_declaration(&d, &impls, &[], &[], &[]);
         assert!(out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk));
         assert!(!out.iter().any(|x| x.rule == DiagnosticRule::AssociativityConfidence));
+    }
+
+    #[test]
+    fn double_float_carriers_downgrade_kotlin_swift() {
+        // Kotlin/Swift Double/Float carriers are non-associative too.
+        for fty in ["Double", "Float"] {
+            let d = decl("KSum", AlgebraicStructure::Semigroup);
+            let impls =
+                vec![ImplInfo { type_name: "KSum".to_string(), methods: vec![combine_method("KSum")] }];
+            let tinfos = vec![tinfo("KSum", &[fty])];
+            let out = check_declaration(&d, &impls, &[], &[], &tinfos);
+            assert!(
+                out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk),
+                "carrier field {fty} should be flagged"
+            );
+        }
     }
 
     #[test]
