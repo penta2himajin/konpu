@@ -342,6 +342,7 @@ fn parse_function(n: Node, source: &str, assoc: bool) -> Option<MethodInfo> {
         params,
         return_type: ret,
         is_assoc_fn: assoc,
+        impure: false,
     })
 }
 
@@ -360,6 +361,7 @@ fn parse_property(n: Node, source: &str, in_companion: bool) -> Option<MethodInf
         params: Vec::new(),
         return_type: Some(ret),
         is_assoc_fn: true,
+        impure: false,
     })
 }
 

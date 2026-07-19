@@ -87,9 +87,10 @@ pub fn check_declaration(
             });
         } else if !had_error && op_returns_self(decl, op) {
             // Closed binary op returning Self satisfies the *signature* necessary
-            // conditions — but a float carrier breaks associativity in practice.
-            // Withhold confidence and warn instead of reassuring falsely.
-            if carrier_contains_float(&decl.type_name, type_infos) {
+            // conditions — but a float carrier or an impure body breaks
+            // associativity in practice. Withhold confidence and warn instead of
+            // reassuring falsely.
+            if op.impure || carrier_contains_float(&decl.type_name, type_infos) {
                 out.push(Diagnostic {
                     severity: Severity::Warning,
                     declaration: declaration.clone(),
@@ -618,6 +619,7 @@ MoneyTest > zeroIsRightIdentity() FAILED";
             params: vec!["other: &Self".to_string()],
             return_type: Some(ret.to_string()),
             is_assoc_fn: false,
+            impure: false,
         }
     }
 
@@ -650,6 +652,19 @@ MoneyTest > zeroIsRightIdentity() FAILED";
         let impls = vec![ImplInfo { type_name: "f64".to_string(), methods: vec![combine_method("f64")] }];
         let out = check_declaration(&d, &impls, &[], &[], &[]);
         assert!(out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk));
+    }
+
+    #[test]
+    fn impure_op_downgrades_confidence_to_risk() {
+        // Op body touches external state (impure=true from extractor) — associativity
+        // is not guaranteed even though the signature is closed.
+        let d = decl("Counter", AlgebraicStructure::Semigroup);
+        let mut m = combine_method("Counter");
+        m.impure = true;
+        let impls = vec![ImplInfo { type_name: "Counter".to_string(), methods: vec![m] }];
+        let out = check_declaration(&d, &impls, &[], &[], &[]);
+        assert!(out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk));
+        assert!(!out.iter().any(|x| x.rule == DiagnosticRule::AssociativityConfidence));
     }
 
     #[test]

@@ -44,6 +44,10 @@ pub struct MethodInfo {
     pub params: Vec<String>,
     pub return_type: Option<String>,
     pub is_assoc_fn: bool,
+    /// 演算本体が非純粋（外部可変状態の読み書き・非決定的呼び出し）と判定されたか。
+    /// 非純粋な演算は結合律を破りうるので confidence を withhold する。今は TS の
+    /// object-literal encoding でのみ算出（他言語・他経路は false）。
+    pub impure: bool,
 }
 
 #[derive(Debug, Clone)]

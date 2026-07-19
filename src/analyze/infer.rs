@@ -223,6 +223,7 @@ mod tests {
             params: params.iter().map(|s| s.to_string()).collect(),
             return_type: ret.map(str::to_string),
             is_assoc_fn,
+            impure: false,
         }
     }
 

@@ -376,6 +376,7 @@ fn synthetic_conformance_methods(protos: &[String], ty: &str) -> Vec<MethodInfo>
             params: vec![ty.to_string(), ty.to_string()],
             return_type: Some(ty.to_string()),
             is_assoc_fn: true,
+            impure: false,
         });
         out.push(MethodInfo {
             name: "zero".to_string(),
@@ -383,6 +384,7 @@ fn synthetic_conformance_methods(protos: &[String], ty: &str) -> Vec<MethodInfo>
             params: Vec::new(),
             return_type: Some(ty.to_string()),
             is_assoc_fn: true,
+            impure: false,
         });
     }
     out
@@ -501,6 +503,7 @@ fn parse_function(n: Node, source: &str) -> Option<MethodInfo> {
         params,
         return_type: ret,
         is_assoc_fn: is_static,
+        impure: false,
     })
 }
 
@@ -537,6 +540,7 @@ fn parse_static_property(n: Node, source: &str) -> Option<MethodInfo> {
         params: Vec::new(),
         return_type: Some(ret),
         is_assoc_fn: true,
+        impure: false,
     })
 }
 

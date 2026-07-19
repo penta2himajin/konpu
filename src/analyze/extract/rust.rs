@@ -661,5 +661,6 @@ fn parse_method(node: Node, source: &str) -> Option<MethodInfo> {
         params,
         return_type,
         is_assoc_fn,
+        impure: false,
     })
 }

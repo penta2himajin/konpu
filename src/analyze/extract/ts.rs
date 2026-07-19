@@ -129,6 +129,8 @@ fn synth_methods(iface: &str, inst: &str) -> Vec<MethodInfo> {
         params: vec![inst.to_string(); arity],
         return_type: Some(inst.to_string()),
         is_assoc_fn: true,
+        // factory 内部は不可視なので純粋性は判定できない → false（保守的に confidence を出す）。
+        impure: false,
     };
     let mut out = vec![m("combine", 2)];
     if matches!(iface, "Monoid" | "Group") {
@@ -167,18 +169,26 @@ fn object_methods(obj: Node, source: &str, inst: &str) -> Vec<MethodInfo> {
     let mut cur = obj.walk();
     for child in obj.children(&mut cur) {
         // `key: value`（pair）と メソッド短縮 `key(...) {}`（method_definition）の両対応。
-        let (key, arity) = match child.kind() {
+        // op 本体（arrow/function/method body）が見えれば非純粋シグナルを判定する。
+        let (key, arity, impure) = match child.kind() {
             "pair" => {
                 let Some(k) = child.child_by_field_name("key") else { continue };
                 if k.kind() != "property_identifier" {
                     continue;
                 }
                 let Some(value) = child.child_by_field_name("value") else { continue };
-                (text_of(k, source).trim().to_string(), value_arity(value))
+                let impure = matches!(value.kind(), "arrow_function" | "function_expression")
+                    && value
+                        .child_by_field_name("body")
+                        .is_some_and(|b| body_is_impure(b, source));
+                (text_of(k, source).trim().to_string(), value_arity(value), impure)
             }
             "method_definition" => {
                 let Some(k) = child.child_by_field_name("name") else { continue };
-                (text_of(k, source).trim().to_string(), param_count(child))
+                let impure = child
+                    .child_by_field_name("body")
+                    .is_some_and(|b| body_is_impure(b, source));
+                (text_of(k, source).trim().to_string(), param_count(child), impure)
             }
             _ => continue,
         };
@@ -189,9 +199,82 @@ fn object_methods(obj: Node, source: &str, inst: &str) -> Vec<MethodInfo> {
             params: vec![inst.to_string(); arity],
             return_type: Some(inst.to_string()),
             is_assoc_fn: true,
+            impure,
         });
     }
     methods
+}
+
+/// 演算本体の非純粋シグナルをヒューリスティックに検出する。confidence を
+/// withhold するための保守的判定（偽陽性＝warning 過多は許容、偽陰性を避ける）:
+/// - 自由変数（本体で束縛されていない識別子）への `++`/`--`/代入 → 外部状態変更
+/// - `Math.random()` / `Date.now()` / `performance.now()` → 非決定的
+///
+/// arrow の本体は式 or ブロック。`body` ノードを渡す。
+fn body_is_impure(body: Node, source: &str) -> bool {
+    // 本体で束縛される名前（引数は含まれない: body の外側なので、代入対象が
+    // 引数なら「本体外束縛」だが引数は純粋な入力。ここでは body 内 let/const/var と
+    // catch/関数引数のみ bound とみなし、引数への再代入も稀なので free 扱いで良い）。
+    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_bound_names(body, source, &mut bound);
+    let mut impure = false;
+    recurse(body, &mut |n| {
+        match n.kind() {
+            "update_expression" => {
+                if let Some(arg) = n.child_by_field_name("argument") {
+                    if let Some(name) = base_ident(arg, source) {
+                        if !bound.contains(&name) {
+                            impure = true;
+                        }
+                    }
+                }
+            }
+            "assignment_expression" | "augmented_assignment_expression" => {
+                if let Some(lhs) = n.child_by_field_name("left") {
+                    if let Some(name) = base_ident(lhs, source) {
+                        if !bound.contains(&name) {
+                            impure = true;
+                        }
+                    }
+                }
+            }
+            "call_expression" => {
+                if let Some(f) = n.child_by_field_name("function") {
+                    let t = text_of(f, source);
+                    if matches!(t, "Math.random" | "Date.now" | "performance.now") {
+                        impure = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    impure
+}
+
+/// `let`/`const`/`var` で宣言された名前を集める（本体内ローカル = 純粋な変更対象）。
+fn collect_bound_names(node: Node, source: &str, out: &mut std::collections::HashSet<String>) {
+    recurse(node, &mut |n| {
+        if n.kind() == "variable_declarator" {
+            if let Some(name) = n.child_by_field_name("name") {
+                if name.kind() == "identifier" {
+                    out.insert(text_of(name, source).to_string());
+                }
+            }
+        }
+    });
+}
+
+/// 代入/更新の対象の基底識別子名。`x` → x、`x.y`/`x[i]` → x（メンバ変更も
+/// 基底オブジェクトの変更）。それ以外は None。
+fn base_ident(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text_of(node, source).to_string()),
+        "member_expression" | "subscript_expression" => {
+            base_ident(node.child_by_field_name("object")?, source)
+        }
+        _ => None,
+    }
 }
 
 /// プロパティ値ノードから演算の項数を推定する。
@@ -529,6 +612,9 @@ fn parse_fn_like(n: Node, source: &str, assoc: bool) -> Option<MethodInfo> {
         params,
         return_type: ret,
         is_assoc_fn: assoc,
+        impure: n
+            .child_by_field_name("body")
+            .is_some_and(|b| body_is_impure(b, source)),
     })
 }
 
@@ -546,6 +632,7 @@ fn parse_field(n: Node, source: &str) -> Option<MethodInfo> {
         params: Vec::new(),
         return_type: Some(ret),
         is_assoc_fn: true,
+        impure: false,
     })
 }
 
@@ -794,5 +881,36 @@ mod tests {
     fn non_algebra_return_type_ignored() {
         let src = "export const mk = <A>(): Order<A> => makeOrder();\nfunction f(): number { return 0; }";
         assert!(instances_of(src).is_empty());
+    }
+
+    #[test]
+    fn impure_concat_flagged_impure() {
+        // concat mutates a module-level free variable — not associative-safe.
+        let src = "let counter = 0;\nexport const M: Monoid<number> = { concat: (x: number, y: number): number => x + y + counter++, empty: 0 };";
+        let m = &instances_of(src)[0];
+        let concat = m.methods.iter().find(|m| m.name == "concat").unwrap();
+        assert!(concat.impure);
+    }
+
+    #[test]
+    fn nondeterministic_concat_flagged_impure() {
+        let src = "export const M: Monoid<number> = { concat: (x: number, y: number): number => x + y + Math.random(), empty: 0 };";
+        let m = &instances_of(src)[0];
+        assert!(m.methods.iter().find(|m| m.name == "concat").unwrap().impure);
+    }
+
+    #[test]
+    fn pure_concat_not_flagged() {
+        let src = "export const M: Monoid<number> = { concat: (x: number, y: number): number => x + y, empty: 0 };";
+        let m = &instances_of(src)[0];
+        assert!(!m.methods.iter().find(|m| m.name == "concat").unwrap().impure);
+    }
+
+    #[test]
+    fn local_mutation_is_pure() {
+        // Mutating a locally-declared accumulator is pure — must NOT be flagged.
+        let src = "export const M: Monoid<number> = { concat: (x: number, y: number): number => { let acc = x; acc += y; return acc; }, empty: 0 };";
+        let m = &instances_of(src)[0];
+        assert!(!m.methods.iter().find(|m| m.name == "concat").unwrap().impure);
     }
 }
