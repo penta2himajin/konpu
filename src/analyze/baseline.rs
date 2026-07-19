@@ -30,6 +30,7 @@ fn rule_str(r: &crate::domain::konpu::DiagnosticRule) -> &'static str {
         DiagnosticRule::FailingLawTest => "FailingLawTest",
         DiagnosticRule::PropagationExceeded => "PropagationExceeded",
         DiagnosticRule::AssociativityConfidence => "AssociativityConfidence",
+        DiagnosticRule::KnownAssociativityRisk => "KnownAssociativityRisk",
     }
 }
 

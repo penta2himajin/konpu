@@ -133,6 +133,8 @@ struct Extracted {
     /// シングルトン型名（`const _: Zero = Zero;` の `Zero`）。oxidtr が Alloy
     /// `one sig` 単位元を出す形。annotation の identity/inverse 存在検査に使う。
     singletons: Vec<String>,
+    /// struct/enum 定義。伝播度計算と、キャリア型の float 判定に使う。
+    type_infos: Vec<propagation::TypeInfo>,
 }
 
 /// 実際の解析本体。provider 非依存の従来ロジック。フェーズに分割して各段を委譲する。
@@ -179,6 +181,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         ignores: Vec::new(),
         uses: Vec::new(),
         singletons: Vec::new(),
+        type_infos: Vec::new(),
     };
     let mut type_infos = Vec::new();
     let mut type_sites: std::collections::HashMap<String, (PathBuf, usize)> =
@@ -223,6 +226,7 @@ fn extract_all(files: &[(PathBuf, parser::Language)], infer: bool) -> Extracted 
         let (size, _count) = propagation::compute_propagation(&decl.type_name, &type_infos);
         decl.propagation = Some(size);
     }
+    ex.type_infos = type_infos;
     ex
 }
 
@@ -235,7 +239,9 @@ fn run_diagnostics(
 ) -> Vec<AnalyzedDiagnostic> {
     let mut out: Vec<AnalyzedDiagnostic> = Vec::new();
     for decl in &ex.decls {
-        for diag in check::check_declaration(decl, &ex.impls, &ex.free_fns, &ex.singletons) {
+        for diag in
+            check::check_declaration(decl, &ex.impls, &ex.free_fns, &ex.singletons, &ex.type_infos)
+        {
             out.push(AnalyzedDiagnostic { path: decl.path.clone(), line: decl.line, diag });
         }
         for diag in check::check_propagation(decl, config, root) {

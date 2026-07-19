@@ -8,6 +8,7 @@ use crate::domain::konpu::{
 use crate::domain::fixtures::all_law_requirements;
 
 use super::extract::{AnalyzedDeclaration, ImplInfo, LawTestInfo, MethodInfo, SelfKind};
+use super::propagation::TypeInfo;
 use super::template::{self, ResolvedConfig};
 
 pub fn check_declaration(
@@ -15,6 +16,7 @@ pub fn check_declaration(
     impls: &[ImplInfo],
     free_fns: &[MethodInfo],
     singletons: &[String],
+    type_infos: &[TypeInfo],
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let declaration = AlgebraicDeclaration {
@@ -84,11 +86,22 @@ pub fn check_declaration(
                 rule: DiagnosticRule::ClosureViolation,
             });
         } else if !had_error && op_returns_self(decl, op) {
-            out.push(Diagnostic {
-                severity: Severity::Info,
-                declaration: declaration.clone(),
-                rule: DiagnosticRule::AssociativityConfidence,
-            });
+            // Closed binary op returning Self satisfies the *signature* necessary
+            // conditions — but a float carrier breaks associativity in practice.
+            // Withhold confidence and warn instead of reassuring falsely.
+            if carrier_contains_float(&decl.type_name, type_infos) {
+                out.push(Diagnostic {
+                    severity: Severity::Warning,
+                    declaration: declaration.clone(),
+                    rule: DiagnosticRule::KnownAssociativityRisk,
+                });
+            } else {
+                out.push(Diagnostic {
+                    severity: Severity::Info,
+                    declaration: declaration.clone(),
+                    rule: DiagnosticRule::AssociativityConfidence,
+                });
+            }
         }
     }
 
@@ -139,6 +152,31 @@ fn has_op(impls: &[&ImplInfo], free_fns: &[MethodInfo], singletons: &[String], n
 
 /// メソッドの戻り型の基底名（参照・ジェネリクス・パスを剥がす）。
 /// パス修飾は Rust の `::` と TS/Swift/Kotlin の `.`（`M.Money` 等）の両方を剥がす。
+fn is_float_ty(t: &str) -> bool {
+    let t = t.trim().trim_start_matches('&').trim();
+    t == "f64" || t == "f32"
+}
+
+/// Does the carrier type resolve to (or transitively contain) a floating-point
+/// field? Covers both `impl for f64` and newtypes like `struct FSum { v: f64 }`.
+/// Floating-point arithmetic is not associative, so a law test is required.
+fn carrier_contains_float(type_name: &str, type_infos: &[TypeInfo]) -> bool {
+    fn go(name: &str, infos: &[TypeInfo], visited: &mut HashSet<String>) -> bool {
+        if is_float_ty(name) {
+            return true;
+        }
+        let base = name.trim().trim_start_matches('&').trim().to_string();
+        if !visited.insert(base.clone()) {
+            return false;
+        }
+        infos
+            .iter()
+            .find(|t| t.name == base)
+            .is_some_and(|ti| ti.field_types.iter().any(|f| go(f, infos, visited)))
+    }
+    go(type_name, type_infos, &mut HashSet::new())
+}
+
 fn ret_base_name(m: &MethodInfo) -> Option<String> {
     let mut s = m.return_type.as_deref()?.trim();
     while let Some(r) = s.strip_prefix('&') {
@@ -571,6 +609,57 @@ MoneyTest > zeroIsRightIdentity() FAILED";
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].2.rule, DiagnosticRule::MissingLawTest);
         assert_eq!(out[0].2.severity, Severity::Warning);
+    }
+
+    fn combine_method(ret: &str) -> MethodInfo {
+        MethodInfo {
+            name: "combine".to_string(),
+            self_param: Some(SelfKind::Ref),
+            params: vec!["other: &Self".to_string()],
+            return_type: Some(ret.to_string()),
+            is_assoc_fn: false,
+        }
+    }
+
+    fn tinfo(name: &str, fields: &[&str]) -> super::super::propagation::TypeInfo {
+        super::super::propagation::TypeInfo {
+            name: name.to_string(),
+            kind: super::super::propagation::TypeKind::Struct,
+            variant_count: 0,
+            field_types: fields.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn float_carrier_downgrades_confidence_to_risk() {
+        // FSum wraps f64 — associativity is NOT guaranteed (float arithmetic).
+        // konpu must NOT emit reassuring AssociativityConfidence; it must warn.
+        let d = decl("FSum", AlgebraicStructure::Semigroup);
+        let impls = vec![ImplInfo { type_name: "FSum".to_string(), methods: vec![combine_method("FSum")] }];
+        let tinfos = vec![tinfo("FSum", &["f64"])];
+        let out = check_declaration(&d, &impls, &[], &[], &tinfos);
+        assert!(out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk
+            && x.severity == Severity::Warning));
+        assert!(!out.iter().any(|x| x.rule == DiagnosticRule::AssociativityConfidence));
+    }
+
+    #[test]
+    fn direct_float_carrier_downgrades() {
+        // impl over f64 itself.
+        let d = decl("f64", AlgebraicStructure::Semigroup);
+        let impls = vec![ImplInfo { type_name: "f64".to_string(), methods: vec![combine_method("f64")] }];
+        let out = check_declaration(&d, &impls, &[], &[], &[]);
+        assert!(out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk));
+    }
+
+    #[test]
+    fn non_float_carrier_keeps_confidence() {
+        let d = decl("Log", AlgebraicStructure::Semigroup);
+        let impls = vec![ImplInfo { type_name: "Log".to_string(), methods: vec![combine_method("Log")] }];
+        let tinfos = vec![tinfo("Log", &["String"])];
+        let out = check_declaration(&d, &impls, &[], &[], &tinfos);
+        assert!(out.iter().any(|x| x.rule == DiagnosticRule::AssociativityConfidence));
+        assert!(!out.iter().any(|x| x.rule == DiagnosticRule::KnownAssociativityRisk));
     }
 }
 

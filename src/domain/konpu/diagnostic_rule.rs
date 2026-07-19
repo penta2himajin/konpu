@@ -8,4 +8,5 @@ pub enum DiagnosticRule {
     FailingLawTest,
     PropagationExceeded,
     AssociativityConfidence,
+    KnownAssociativityRisk,
 }

@@ -163,6 +163,7 @@ one sig MissingLawTest          extends DiagnosticRule {}
 one sig FailingLawTest          extends DiagnosticRule {}
 one sig PropagationExceeded     extends DiagnosticRule {}
 one sig AssociativityConfidence extends DiagnosticRule {}
+one sig KnownAssociativityRisk  extends DiagnosticRule {}
 
 sig Diagnostic {
   severity: one Severity,
@@ -196,6 +197,12 @@ fact PropagationExceededIsWarning {
 
 fact AssociativityConfidenceIsInfo {
   all d: Diagnostic | d.rule = AssociativityConfidence implies d.severity = Info
+}
+
+-- Floating-point (and other known non-associative patterns) can be a closed
+-- binary op yet break associativity. Konpu withholds confidence and warns.
+fact KnownAssociativityRiskIsWarning {
+  all d: Diagnostic | d.rule = KnownAssociativityRisk implies d.severity = Warning
 }
 
 -------------------------------------------------------------------------------
